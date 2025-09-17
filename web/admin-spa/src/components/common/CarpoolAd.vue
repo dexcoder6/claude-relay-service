@@ -10,12 +10,12 @@
         </div>
         <div>
           <h3 class="mb-1 text-lg font-bold">拼车服务</h3>
-          <p class="text-sm opacity-90">不想自己搭建？加入我们的官方拼车服务：</p>
+          <p class="text-sm opacity-90">我们还提供专业的拼车服务：</p>
           <div class="mt-2 text-xs opacity-80">
             <div class="flex flex-wrap gap-4">
               <span>• Claude Code Max 20X: 节省60%+</span>
               <span>• CodeX: 多模型支持，更多选择</span>
-              <span>• 专业管理: 7×24小时技术支持</span>
+              <span>• 稳定可靠: 专业运维和技术保障</span>
               <span>• 安全可控: 使用本项目搭建，数据安全</span>
             </div>
           </div>
@@ -40,12 +40,12 @@
       <div class="mb-2 text-center">
         <div class="mb-2 text-3xl">🚗</div>
         <h3 class="mb-1 text-lg font-bold">拼车服务</h3>
-        <p class="text-sm opacity-90">不想自己搭建？加入官方拼车服务</p>
+        <p class="text-sm opacity-90">我们还提供专业的拼车服务</p>
         <div class="mt-2 text-xs opacity-80">
           <div class="space-y-1">
             <div>• Claude Code Max 20X: 节省60%+</div>
             <div>• CodeX: 多模型支持，更多选择</div>
-            <div>• 专业管理: 7×24小时技术支持</div>
+            <div>• 稳定可靠: 专业运维和技术保障</div>
             <div>• 安全可控: 使用本项目搭建，数据安全</div>
           </div>
         </div>
