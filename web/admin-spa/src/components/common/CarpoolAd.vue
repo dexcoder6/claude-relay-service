@@ -10,7 +10,9 @@
         </div>
         <div>
           <h3 class="mb-1 text-lg font-bold">拼车服务</h3>
-          <p class="text-sm opacity-90">我们还提供专业的拼车服务：</p>
+          <p class="text-sm opacity-90">
+            没有稳定的支付渠道？订阅总是出问题？部署太复杂？👉 可以考虑我们提供的拼车服务。
+          </p>
           <div class="mt-2 text-xs opacity-80">
             <div class="flex flex-wrap gap-4">
               <span>• Claude Code Max 20X: 节省60%+</span>
@@ -40,7 +42,9 @@
       <div class="mb-2 text-center">
         <div class="mb-2 text-3xl">🚗</div>
         <h3 class="mb-1 text-lg font-bold">拼车服务</h3>
-        <p class="text-sm opacity-90">我们还提供专业的拼车服务</p>
+        <p class="text-sm opacity-90">
+          没有稳定的支付渠道？订阅总是出问题？部署太复杂？👉 可以考虑我们提供的拼车服务。
+        </p>
         <div class="mt-2 text-xs opacity-80">
           <div class="space-y-1">
             <div>• Claude Code Max 20X: 节省60%+</div>

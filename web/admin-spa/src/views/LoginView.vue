@@ -75,6 +75,13 @@
         </button>
       </form>
 
+      <!-- 演示环境提示 -->
+      <div
+        class="mt-4 rounded-lg border border-blue-500/30 bg-blue-500/20 p-3 text-center text-xs text-blue-800 backdrop-blur-sm dark:text-blue-400 sm:mt-6 sm:rounded-xl sm:p-4 sm:text-sm"
+      >
+        <i class="fas fa-info-circle mr-2" />演示环境默认账号：admin，密码：123456
+      </div>
+
       <div
         v-if="authStore.loginError"
         class="mt-4 rounded-lg border border-red-500/30 bg-red-500/20 p-3 text-center text-xs text-red-800 backdrop-blur-sm dark:text-red-400 sm:mt-6 sm:rounded-xl sm:p-4 sm:text-sm"
@@ -96,8 +103,8 @@ const themeStore = useThemeStore()
 const oemLoading = computed(() => authStore.oemLoading)
 
 const loginForm = ref({
-  username: '',
-  password: ''
+  username: 'admin',
+  password: '123456'
 })
 
 onMounted(() => {
