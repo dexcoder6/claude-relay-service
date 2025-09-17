@@ -43,6 +43,11 @@
       </div>
     </div>
 
+    <!-- 拼车服务广告 -->
+    <div class="mb-6 md:mb-8">
+      <CarpoolAd />
+    </div>
+
     <!-- Tab 切换 -->
     <div class="mb-6 md:mb-8">
       <div class="flex justify-center">
@@ -154,6 +159,7 @@ import { useApiStatsStore } from '@/stores/apistats'
 import { useThemeStore } from '@/stores/theme'
 import LogoTitle from '@/components/common/LogoTitle.vue'
 import ThemeToggle from '@/components/common/ThemeToggle.vue'
+import CarpoolAd from '@/components/common/CarpoolAd.vue'
 import ApiKeyInput from '@/components/apistats/ApiKeyInput.vue'
 import StatsOverview from '@/components/apistats/StatsOverview.vue'
 import TokenDistribution from '@/components/apistats/TokenDistribution.vue'

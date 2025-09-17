@@ -711,8 +711,20 @@ router.post('/api-keys/batch', authenticateAdmin, async (req, res) => {
       return res.status(400).json({ error: 'Base name is required and must be a non-empty string' })
     }
 
-    if (!count || !Number.isInteger(count) || count < 2 || count > 500) {
-      return res.status(400).json({ error: 'Count must be an integer between 2 and 500' })
+    // 检测演示环境
+    const isDemoMode =
+      process.env.DEMO_MODE === 'true' ||
+      req.headers.host?.includes('demo') ||
+      req.headers.host?.includes('test')
+
+    const maxCount = isDemoMode ? 10 : 500
+    const rangeText = isDemoMode ? '2-10' : '2-500'
+
+    if (!count || !Number.isInteger(count) || count < 2 || count > maxCount) {
+      const message = isDemoMode
+        ? `演示环境限制：Count must be an integer between ${rangeText}`
+        : `Count must be an integer between ${rangeText}`
+      return res.status(400).json({ error: message })
     }
 
     if (baseName.length > 90) {

@@ -3,6 +3,11 @@
     <!-- 顶部导航 -->
     <AppHeader />
 
+    <!-- 拼车服务广告 -->
+    <div class="mb-4 sm:mb-6">
+      <CarpoolAd />
+    </div>
+
     <!-- 主内容区域 -->
     <div
       class="glass-strong rounded-xl p-3 shadow-xl sm:rounded-2xl sm:p-4 md:rounded-3xl md:p-6"
@@ -25,6 +30,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
 import AppHeader from './AppHeader.vue'
 import TabBar from './TabBar.vue'
+import CarpoolAd from '@/components/common/CarpoolAd.vue'
 
 const route = useRoute()
 const router = useRouter()

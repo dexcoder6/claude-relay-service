@@ -82,14 +82,14 @@
                     <input
                       v-model.number="form.batchCount"
                       class="form-input w-full border-gray-300 text-sm dark:border-gray-600 dark:bg-gray-700 dark:text-gray-200 dark:placeholder-gray-400"
-                      max="500"
+                      :max="isDemoMode ? 10 : 500"
                       min="2"
-                      placeholder="输入数量 (2-500)"
+                      :placeholder="isDemoMode ? '输入数量 (2-10)' : '输入数量 (2-500)'"
                       required
                       type="number"
                     />
                     <div class="whitespace-nowrap text-xs text-gray-500 dark:text-gray-400">
-                      最大支持 500 个
+                      {{ isDemoMode ? '演示环境限制 10 个' : '最大支持 500 个' }}
                     </div>
                   </div>
                 </div>
@@ -102,6 +102,19 @@
                   }}_1, {{ form.name || 'MyKey' }}_2 ...</span
                 >
               </p>
+              <!-- 演示环境限制提示 -->
+              <div
+                v-if="isDemoMode"
+                class="mt-2 rounded-md border border-orange-200 bg-orange-50 p-2 dark:border-orange-700 dark:bg-orange-900/20"
+              >
+                <p class="flex items-start text-xs text-orange-700 dark:text-orange-300">
+                  <i class="fas fa-exclamation-triangle mr-1 mt-0.5 flex-shrink-0" />
+                  <span>
+                    <strong>演示环境限制：</strong>为保证演示环境稳定，批量创建最多支持 10 个 API
+                    Key。如需更多数量，请使用生产环境或联系管理员。
+                  </span>
+                </p>
+              </div>
             </div>
           </div>
 
@@ -810,6 +823,21 @@ import { useApiKeysStore } from '@/stores/apiKeys'
 import { apiClient } from '@/config/api'
 import AccountSelector from '@/components/common/AccountSelector.vue'
 
+// 检测演示环境
+const isDemoMode = computed(() => {
+  // 可以通过多种方式检测演示环境：
+  // 1. 检查域名
+  if (window.location.hostname.includes('demo') || window.location.hostname.includes('test')) {
+    return true
+  }
+  // 2. 检查环境变量
+  if (import.meta.env.VITE_DEMO_MODE === 'true') {
+    return true
+  }
+  // 3. 检查特定路径或配置
+  return false
+})
+
 const props = defineProps({
   accounts: {
     type: Object,
@@ -1147,8 +1175,13 @@ const createApiKey = async () => {
 
   // 批量创建时验证数量
   if (form.createType === 'batch') {
-    if (!form.batchCount || form.batchCount < 2 || form.batchCount > 500) {
-      showToast('批量创建数量必须在 2-500 之间', 'error')
+    const maxBatchCount = isDemoMode.value ? 10 : 500
+    const rangeText = isDemoMode.value ? '2-10' : '2-500'
+    if (!form.batchCount || form.batchCount < 2 || form.batchCount > maxBatchCount) {
+      const message = isDemoMode.value
+        ? `演示环境限制：批量创建数量必须在 ${rangeText} 之间`
+        : `批量创建数量必须在 ${rangeText} 之间`
+      showToast(message, 'error')
       return
     }
   }
