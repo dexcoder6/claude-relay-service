@@ -342,8 +342,57 @@
                 step="0.01"
                 type="number"
               />
-              <p class="text-xs text-gray-500 dark:text-gray-400">
+              <p class="dark:text灰-400 text-xs text-gray-500">
                 设置此 API Key 每日的费用限制，超过限制将拒绝请求，0 或留空表示无限制
+              </p>
+            </div>
+          </div>
+
+          <div>
+            <label class="mb-2 block text-sm font-semibold text-gray-700 dark:text-gray-300"
+              >总费用限制 (美元)</label
+            >
+            <div class="space-y-2">
+              <div class="flex gap-2">
+                <button
+                  class="rounded bg-gray-100 px-2 py-1 text-xs font-medium hover:bg-gray-200 dark:bg-gray-700 dark:text-gray-300 dark:hover:bg-gray-600"
+                  type="button"
+                  @click="form.totalCostLimit = '100'"
+                >
+                  $100
+                </button>
+                <button
+                  class="rounded bg-gray-100 px-2 py-1 text-xs font-medium hover:bg-gray-200 dark:bg-gray-700 dark:text-gray-300 dark:hover:bg-gray-600"
+                  type="button"
+                  @click="form.totalCostLimit = '500'"
+                >
+                  $500
+                </button>
+                <button
+                  class="rounded bg-gray-100 px-2 py-1 text-xs font-medium hover:bg-gray-200 dark:bg-gray-700 dark:text-gray-300 dark:hover:bg-gray-600"
+                  type="button"
+                  @click="form.totalCostLimit = '1000'"
+                >
+                  $1000
+                </button>
+                <button
+                  class="rounded bg-gray-100 px-2 py-1 text-xs font-medium hover:bg-gray-200 dark:bg-gray-700 dark:text-gray-300 dark:hover:bg-gray-600"
+                  type="button"
+                  @click="form.totalCostLimit = ''"
+                >
+                  自定义
+                </button>
+              </div>
+              <input
+                v-model="form.totalCostLimit"
+                class="form-input w-full border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-gray-200 dark:placeholder-gray-400"
+                min="0"
+                placeholder="0 表示无限制"
+                step="0.01"
+                type="number"
+              />
+              <p class="text-xs text-gray-500 dark:text-gray-400">
+                设置此 API Key 的累计总费用限制，达到限制后将拒绝所有后续请求，0 或留空表示无限制
               </p>
             </div>
           </div>
@@ -456,11 +505,11 @@
               <p class="mt-2 text-xs text-gray-500 dark:text-gray-400">
                 <span v-if="form.expirationMode === 'fixed'">
                   <i class="fas fa-info-circle mr-1" />
-                  固定时间模式：Key 创建后立即生效，按设定时间过期
+                  固定时间模式：Key 创建后立即生效，按设定时间过期（支持小时和天数）
                 </span>
                 <span v-else>
                   <i class="fas fa-info-circle mr-1" />
-                  激活模式：Key 首次使用时激活，激活后按设定天数过期（适合批量销售）
+                  激活模式：Key 首次使用时激活，激活后按设定时间过期（支持小时和天数，适合批量销售）
                 </span>
               </p>
             </div>
@@ -473,6 +522,10 @@
                 @change="updateExpireAt"
               >
                 <option value="">永不过期</option>
+                <option value="1h">1 小时</option>
+                <option value="3h">3 小时</option>
+                <option value="6h">6 小时</option>
+                <option value="12h">12 小时</option>
                 <option value="1d">1 天</option>
                 <option value="7d">7 天</option>
                 <option value="30d">30 天</option>
@@ -501,27 +554,36 @@
                 <input
                   v-model.number="form.activationDays"
                   class="form-input flex-1 border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-gray-200"
-                  max="3650"
+                  :max="form.activationUnit === 'hours' ? 8760 : 3650"
                   min="1"
-                  placeholder="输入天数"
+                  :placeholder="form.activationUnit === 'hours' ? '输入小时数' : '输入天数'"
                   type="number"
                 />
-                <span class="text-sm text-gray-600 dark:text-gray-400">天</span>
+                <select
+                  v-model="form.activationUnit"
+                  class="form-input w-20 border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-gray-200"
+                  @change="updateActivationValue"
+                >
+                  <option value="hours">小时</option>
+                  <option value="days">天</option>
+                </select>
               </div>
               <div class="mt-2 flex flex-wrap gap-2">
                 <button
-                  v-for="days in [30, 90, 180, 365]"
-                  :key="days"
+                  v-for="value in getQuickTimeOptions()"
+                  :key="value.value"
                   class="rounded-md border border-gray-300 px-3 py-1 text-xs hover:bg-gray-100 dark:border-gray-600 dark:hover:bg-gray-700"
                   type="button"
-                  @click="form.activationDays = days"
+                  @click="form.activationDays = value.value"
                 >
-                  {{ days }}天
+                  {{ value.label }}
                 </button>
               </div>
               <p class="mt-2 text-xs text-gray-500 dark:text-gray-400">
                 <i class="fas fa-clock mr-1" />
-                Key 将在首次使用后激活，激活后 {{ form.activationDays || 30 }} 天过期
+                Key 将在首次使用后激活，激活后
+                {{ form.activationDays || (form.activationUnit === 'hours' ? 24 : 30) }}
+                {{ form.activationUnit === 'hours' ? '小时' : '天' }}过期
               </p>
             </div>
           </div>
@@ -567,6 +629,15 @@
                 />
                 <span class="text-sm text-gray-700 dark:text-gray-300">仅 OpenAI</span>
               </label>
+              <label class="flex cursor-pointer items-center">
+                <input
+                  v-model="form.permissions"
+                  class="mr-2 text-blue-600 focus:ring-blue-500 dark:border-gray-600 dark:bg-gray-700"
+                  type="radio"
+                  value="droid"
+                />
+                <span class="text-sm text-gray-700 dark:text-gray-300">仅 Droid</span>
+              </label>
             </div>
             <p class="mt-2 text-xs text-gray-500 dark:text-gray-400">
               控制此 API Key 可以访问哪些服务
@@ -604,7 +675,7 @@
                   v-model="form.claudeAccountId"
                   :accounts="localAccounts.claude"
                   default-option-text="使用共享账号池"
-                  :disabled="form.permissions === 'gemini' || form.permissions === 'openai'"
+                  :disabled="form.permissions !== 'all' && form.permissions !== 'claude'"
                   :groups="localAccounts.claudeGroups"
                   placeholder="请选择Claude账号"
                   platform="claude"
@@ -618,7 +689,7 @@
                   v-model="form.geminiAccountId"
                   :accounts="localAccounts.gemini"
                   default-option-text="使用共享账号池"
-                  :disabled="form.permissions === 'claude' || form.permissions === 'openai'"
+                  :disabled="form.permissions !== 'all' && form.permissions !== 'gemini'"
                   :groups="localAccounts.geminiGroups"
                   placeholder="请选择Gemini账号"
                   platform="gemini"
@@ -632,7 +703,7 @@
                   v-model="form.openaiAccountId"
                   :accounts="localAccounts.openai"
                   default-option-text="使用共享账号池"
-                  :disabled="form.permissions === 'claude' || form.permissions === 'gemini'"
+                  :disabled="form.permissions !== 'all' && form.permissions !== 'openai'"
                   :groups="localAccounts.openaiGroups"
                   placeholder="请选择OpenAI账号"
                   platform="openai"
@@ -646,10 +717,24 @@
                   v-model="form.bedrockAccountId"
                   :accounts="localAccounts.bedrock"
                   default-option-text="使用共享账号池"
-                  :disabled="form.permissions === 'gemini' || form.permissions === 'openai'"
+                  :disabled="form.permissions !== 'all' && form.permissions !== 'openai'"
                   :groups="[]"
                   placeholder="请选择Bedrock账号"
                   platform="bedrock"
+                />
+              </div>
+              <div>
+                <label class="mb-1 block text-sm font-medium text-gray-600 dark:text-gray-400"
+                  >Droid 专属账号</label
+                >
+                <AccountSelector
+                  v-model="form.droidAccountId"
+                  :accounts="localAccounts.droid"
+                  default-option-text="使用共享账号池"
+                  :disabled="form.permissions !== 'all' && form.permissions !== 'droid'"
+                  :groups="localAccounts.droidGroups"
+                  placeholder="请选择Droid账号"
+                  platform="droid"
                 />
               </div>
             </div>
@@ -841,7 +926,17 @@ const isDemoMode = computed(() => {
 const props = defineProps({
   accounts: {
     type: Object,
-    default: () => ({ claude: [], gemini: [] })
+    default: () => ({
+      claude: [],
+      gemini: [],
+      openai: [],
+      bedrock: [],
+      droid: [],
+      claudeGroups: [],
+      geminiGroups: [],
+      openaiGroups: [],
+      droidGroups: []
+    })
   }
 })
 
@@ -855,10 +950,12 @@ const localAccounts = ref({
   claude: [],
   gemini: [],
   openai: [],
-  bedrock: [], // 添加 Bedrock 账号列表
+  bedrock: [],
+  droid: [],
   claudeGroups: [],
   geminiGroups: [],
-  openaiGroups: []
+  openaiGroups: [],
+  droidGroups: []
 })
 
 // 表单验证状态
@@ -889,17 +986,20 @@ const form = reactive({
   rateLimitCost: '', // 新增：费用限制
   concurrencyLimit: '',
   dailyCostLimit: '',
+  totalCostLimit: '',
   weeklyOpusCostLimit: '',
   expireDuration: '',
   customExpireDate: '',
   expiresAt: null,
   expirationMode: 'fixed', // 过期模式：fixed(固定) 或 activation(激活)
   activationDays: 30, // 激活后有效天数
+  activationUnit: 'days', // 激活时间单位：hours 或 days
   permissions: 'all',
   claudeAccountId: '',
   geminiAccountId: '',
   openaiAccountId: '',
-  bedrockAccountId: '', // 添加 Bedrock 账号ID
+  bedrockAccountId: '',
+  droidAccountId: '',
   enableModelRestriction: false,
   restrictedModels: [],
   modelInput: '',
@@ -937,10 +1037,15 @@ onMounted(async () => {
       claude: props.accounts.claude || [],
       gemini: props.accounts.gemini || [],
       openai: openaiAccounts,
-      bedrock: props.accounts.bedrock || [], // 添加 Bedrock 账号
+      bedrock: props.accounts.bedrock || [],
+      droid: (props.accounts.droid || []).map((account) => ({
+        ...account,
+        platform: 'droid'
+      })),
       claudeGroups: props.accounts.claudeGroups || [],
       geminiGroups: props.accounts.geminiGroups || [],
-      openaiGroups: props.accounts.openaiGroups || []
+      openaiGroups: props.accounts.openaiGroups || [],
+      droidGroups: props.accounts.droidGroups || []
     }
   }
 
@@ -959,6 +1064,7 @@ const refreshAccounts = async () => {
       openaiData,
       openaiResponsesData,
       bedrockData,
+      droidData,
       groupsData
     ] = await Promise.all([
       apiClient.get('/admin/claude-accounts'),
@@ -966,7 +1072,8 @@ const refreshAccounts = async () => {
       apiClient.get('/admin/gemini-accounts'),
       apiClient.get('/admin/openai-accounts'),
       apiClient.get('/admin/openai-responses-accounts'), // 获取 OpenAI-Responses 账号
-      apiClient.get('/admin/bedrock-accounts'), // 添加 Bedrock 账号获取
+      apiClient.get('/admin/bedrock-accounts'),
+      apiClient.get('/admin/droid-accounts'),
       apiClient.get('/admin/account-groups')
     ])
 
@@ -1034,12 +1141,21 @@ const refreshAccounts = async () => {
       }))
     }
 
+    if (droidData.success) {
+      localAccounts.value.droid = (droidData.data || []).map((account) => ({
+        ...account,
+        platform: 'droid',
+        isDedicated: account.accountType === 'dedicated'
+      }))
+    }
+
     // 处理分组数据
     if (groupsData.success) {
       const allGroups = groupsData.data || []
       localAccounts.value.claudeGroups = allGroups.filter((g) => g.platform === 'claude')
       localAccounts.value.geminiGroups = allGroups.filter((g) => g.platform === 'gemini')
       localAccounts.value.openaiGroups = allGroups.filter((g) => g.platform === 'openai')
+      localAccounts.value.droidGroups = allGroups.filter((g) => g.platform === 'droid')
     }
 
     showToast('账号列表已刷新', 'success')
@@ -1163,6 +1279,40 @@ const removeTag = (index) => {
   form.tags.splice(index, 1)
 }
 
+// 获取快捷时间选项
+const getQuickTimeOptions = () => {
+  if (form.activationUnit === 'hours') {
+    return [
+      { value: 1, label: '1小时' },
+      { value: 3, label: '3小时' },
+      { value: 6, label: '6小时' },
+      { value: 12, label: '12小时' }
+    ]
+  } else {
+    return [
+      { value: 30, label: '30天' },
+      { value: 90, label: '90天' },
+      { value: 180, label: '180天' },
+      { value: 365, label: '365天' }
+    ]
+  }
+}
+
+// 单位变化时更新数值
+const updateActivationValue = () => {
+  if (form.activationUnit === 'hours') {
+    // 从天切换到小时，设置一个合理的默认值
+    if (form.activationDays > 24) {
+      form.activationDays = 24
+    }
+  } else {
+    // 从小时切换到天，设置一个合理的默认值
+    if (form.activationDays < 1) {
+      form.activationDays = 1
+    }
+  }
+}
+
 // 创建 API Key
 const createApiKey = async () => {
   // 验证表单
@@ -1232,6 +1382,10 @@ const createApiKey = async () => {
         form.dailyCostLimit !== '' && form.dailyCostLimit !== null
           ? parseFloat(form.dailyCostLimit)
           : 0,
+      totalCostLimit:
+        form.totalCostLimit !== '' && form.totalCostLimit !== null
+          ? parseFloat(form.totalCostLimit)
+          : 0,
       weeklyOpusCostLimit:
         form.weeklyOpusCostLimit !== '' && form.weeklyOpusCostLimit !== null
           ? parseFloat(form.weeklyOpusCostLimit)
@@ -1239,6 +1393,7 @@ const createApiKey = async () => {
       expiresAt: form.expirationMode === 'fixed' ? form.expiresAt || undefined : undefined,
       expirationMode: form.expirationMode,
       activationDays: form.expirationMode === 'activation' ? form.activationDays : undefined,
+      activationUnit: form.expirationMode === 'activation' ? form.activationUnit : undefined,
       permissions: form.permissions,
       tags: form.tags.length > 0 ? form.tags : undefined,
       enableModelRestriction: form.enableModelRestriction,
@@ -1275,6 +1430,9 @@ const createApiKey = async () => {
     // Bedrock账户绑定
     if (form.bedrockAccountId) {
       baseData.bedrockAccountId = form.bedrockAccountId
+    }
+    if (form.droidAccountId) {
+      baseData.droidAccountId = form.droidAccountId
     }
 
     if (form.createType === 'single') {
