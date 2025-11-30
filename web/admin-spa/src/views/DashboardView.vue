@@ -119,6 +119,20 @@
                     dashboardData.accountsByPlatform.azure_openai.total
                   }}</span>
                 </div>
+                <!-- OpenAI-Responses账户 -->
+                <div
+                  v-if="
+                    dashboardData.accountsByPlatform['openai-responses'] &&
+                    dashboardData.accountsByPlatform['openai-responses'].total > 0
+                  "
+                  class="inline-flex items-center gap-0.5"
+                  :title="`OpenAI Responses: ${dashboardData.accountsByPlatform['openai-responses'].total} 个 (正常: ${dashboardData.accountsByPlatform['openai-responses'].normal})`"
+                >
+                  <i class="fas fa-server text-xs text-cyan-600" />
+                  <span class="text-xs font-medium text-gray-700 dark:text-gray-300">{{
+                    dashboardData.accountsByPlatform['openai-responses'].total
+                  }}</span>
+                </div>
               </div>
             </div>
             <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
@@ -607,6 +621,58 @@
         </div>
       </div>
     </div>
+
+    <!-- 账号使用趋势图 -->
+    <div class="mb-4 sm:mb-6 md:mb-8">
+      <div class="card p-4 sm:p-6">
+        <div class="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <div class="flex flex-col gap-1 sm:flex-row sm:items-center sm:gap-3">
+            <h3 class="text-base font-semibold text-gray-900 dark:text-gray-100 sm:text-lg">
+              账号使用趋势
+            </h3>
+            <span class="text-xs text-gray-500 dark:text-gray-400 sm:text-sm">
+              当前分组：{{ accountUsageTrendData.groupLabel || '未选择' }}
+            </span>
+          </div>
+          <div class="flex flex-wrap items-center gap-2">
+            <div class="flex gap-1 rounded-lg bg-gray-100 p-1 dark:bg-gray-700">
+              <button
+                v-for="option in accountGroupOptions"
+                :key="option.value"
+                :class="[
+                  'rounded-md px-2 py-1 text-xs font-medium transition-colors sm:px-3 sm:text-sm',
+                  accountUsageGroup === option.value
+                    ? 'bg-white text-blue-600 shadow-sm dark:bg-gray-800'
+                    : 'text-gray-600 hover:text-gray-900 dark:text-gray-300 dark:hover:text-gray-100'
+                ]"
+                @click="handleAccountUsageGroupChange(option.value)"
+              >
+                {{ option.label }}
+              </button>
+            </div>
+          </div>
+        </div>
+        <div
+          class="mb-4 flex flex-wrap items-center gap-2 text-xs text-gray-600 dark:text-gray-400 sm:text-sm"
+        >
+          <span>共 {{ accountUsageTrendData.totalAccounts || 0 }} 个账号</span>
+          <span
+            v-if="accountUsageTrendData.topAccounts && accountUsageTrendData.topAccounts.length"
+          >
+            显示消耗排名前 {{ accountUsageTrendData.topAccounts.length }} 个账号
+          </span>
+        </div>
+        <div
+          v-if="!accountUsageTrendData.data || accountUsageTrendData.data.length === 0"
+          class="py-12 text-center text-sm text-gray-500 dark:text-gray-400"
+        >
+          暂无账号使用数据
+        </div>
+        <div v-else class="sm:h-[350px]" style="height: 300px">
+          <canvas ref="accountUsageTrendChart" />
+        </div>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -627,6 +693,8 @@ const {
   dashboardModelStats,
   trendData,
   apiKeysTrendData,
+  accountUsageTrendData,
+  accountUsageGroup,
   formattedUptime,
   dateFilter,
   trendGranularity,
@@ -641,6 +709,7 @@ const {
   onCustomDateRangeChange,
   setTrendGranularity,
   refreshChartsData,
+  setAccountUsageGroup,
   disabledDate
 } = dashboardStore
 
@@ -648,9 +717,20 @@ const {
 const modelUsageChart = ref(null)
 const usageTrendChart = ref(null)
 const apiKeysUsageTrendChart = ref(null)
+const accountUsageTrendChart = ref(null)
 let modelUsageChartInstance = null
 let usageTrendChartInstance = null
 let apiKeysUsageTrendChartInstance = null
+let accountUsageTrendChartInstance = null
+
+const accountGroupOptions = [
+  { value: 'claude', label: 'Claude' },
+  { value: 'openai', label: 'OpenAI' },
+  { value: 'gemini', label: 'Gemini' },
+  { value: 'droid', label: 'Droid' }
+]
+
+const accountTrendUpdating = ref(false)
 
 // 自动刷新相关
 const autoRefreshEnabled = ref(false)
@@ -681,6 +761,19 @@ function formatNumber(num) {
     return (num / 1000).toFixed(2) + 'K'
   }
   return num.toString()
+}
+
+function formatCostValue(cost) {
+  if (!Number.isFinite(cost)) {
+    return '$0.000000'
+  }
+  if (cost >= 1) {
+    return `$${cost.toFixed(2)}`
+  }
+  if (cost >= 0.01) {
+    return `$${cost.toFixed(3)}`
+  }
+  return `$${cost.toFixed(6)}`
 }
 
 // 计算百分比
@@ -1187,6 +1280,186 @@ async function updateApiKeysUsageTrendChart() {
   createApiKeysUsageTrendChart()
 }
 
+function createAccountUsageTrendChart() {
+  if (!accountUsageTrendChart.value) return
+
+  if (accountUsageTrendChartInstance) {
+    accountUsageTrendChartInstance.destroy()
+  }
+
+  const trend = accountUsageTrendData.value?.data || []
+  const topAccounts = accountUsageTrendData.value?.topAccounts || []
+
+  const colors = [
+    '#2563EB',
+    '#059669',
+    '#D97706',
+    '#DC2626',
+    '#7C3AED',
+    '#F472B6',
+    '#0EA5E9',
+    '#F97316',
+    '#6366F1',
+    '#22C55E'
+  ]
+
+  const datasets = topAccounts.map((accountId, index) => {
+    const dataPoints = trend.map((item) => {
+      if (!item.accounts || !item.accounts[accountId]) return 0
+      return item.accounts[accountId].cost || 0
+    })
+
+    const accountName =
+      trend.find((item) => item.accounts && item.accounts[accountId])?.accounts[accountId]?.name ||
+      `账号 ${String(accountId).slice(0, 6)}`
+
+    return {
+      label: accountName,
+      data: dataPoints,
+      borderColor: colors[index % colors.length],
+      backgroundColor: colors[index % colors.length] + '20',
+      tension: 0.4,
+      fill: false
+    }
+  })
+
+  const labelField = trend[0]?.date ? 'date' : 'hour'
+
+  const chartData = {
+    labels: trend.map((item) => {
+      if (item.label) {
+        return item.label
+      }
+
+      if (labelField === 'hour') {
+        const date = new Date(item.hour)
+        const month = String(date.getMonth() + 1).padStart(2, '0')
+        const day = String(date.getDate()).padStart(2, '0')
+        const hour = String(date.getHours()).padStart(2, '0')
+        return `${month}/${day} ${hour}:00`
+      }
+
+      if (item.date && item.date.includes('-')) {
+        const parts = item.date.split('-')
+        if (parts.length >= 3) {
+          return `${parts[1]}/${parts[2]}`
+        }
+      }
+
+      return item.date
+    }),
+    datasets
+  }
+
+  const topAccountIds = topAccounts
+
+  accountUsageTrendChartInstance = new Chart(accountUsageTrendChart.value, {
+    type: 'line',
+    data: chartData,
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      interaction: {
+        mode: 'index',
+        intersect: false
+      },
+      plugins: {
+        legend: {
+          position: 'bottom',
+          labels: {
+            padding: 20,
+            usePointStyle: true,
+            font: {
+              size: 12
+            },
+            color: chartColors.value.legend
+          }
+        },
+        tooltip: {
+          mode: 'index',
+          intersect: false,
+          itemSort: (a, b) => b.parsed.y - a.parsed.y,
+          callbacks: {
+            label: function (context) {
+              const label = context.dataset.label || ''
+              const value = context.parsed.y || 0
+              const dataIndex = context.dataIndex
+              const datasetIndex = context.datasetIndex
+              const accountId = topAccountIds[datasetIndex]
+              const dataPoint = accountUsageTrendData.value.data[dataIndex]
+              const accountDetail = dataPoint?.accounts?.[accountId]
+
+              const allValues = context.chart.data.datasets
+                .map((dataset, idx) => ({
+                  value: dataset.data[dataIndex] || 0,
+                  index: idx
+                }))
+                .sort((a, b) => b.value - a.value)
+
+              const rank = allValues.findIndex((item) => item.index === datasetIndex) + 1
+              let rankIcon = ''
+              if (rank === 1) rankIcon = '🥇 '
+              else if (rank === 2) rankIcon = '🥈 '
+              else if (rank === 3) rankIcon = '🥉 '
+
+              const formattedCost = accountDetail?.formattedCost || formatCostValue(value)
+              const requests = accountDetail?.requests || 0
+
+              return `${rankIcon}${label}: ${formattedCost} / ${requests.toLocaleString()} 次`
+            }
+          }
+        }
+      },
+      scales: {
+        x: {
+          type: 'category',
+          display: true,
+          title: {
+            display: true,
+            text: trendGranularity.value === 'hour' ? '时间' : '日期',
+            color: chartColors.value.text
+          },
+          ticks: {
+            color: chartColors.value.text
+          },
+          grid: {
+            color: chartColors.value.grid
+          }
+        },
+        y: {
+          beginAtZero: true,
+          title: {
+            display: true,
+            text: '消耗金额 (USD)',
+            color: chartColors.value.text
+          },
+          ticks: {
+            callback: (value) => formatCostValue(Number(value)),
+            color: chartColors.value.text
+          },
+          grid: {
+            color: chartColors.value.grid
+          }
+        }
+      }
+    }
+  })
+}
+
+async function handleAccountUsageGroupChange(group) {
+  if (accountUsageGroup.value === group || accountTrendUpdating.value) {
+    return
+  }
+  accountTrendUpdating.value = true
+  try {
+    await setAccountUsageGroup(group)
+    await nextTick()
+    createAccountUsageTrendChart()
+  } finally {
+    accountTrendUpdating.value = false
+  }
+}
+
 // 监听数据变化更新图表
 watch(dashboardModelStats, () => {
   nextTick(() => createModelUsageChart())
@@ -1198,6 +1471,10 @@ watch(trendData, () => {
 
 watch(apiKeysTrendData, () => {
   nextTick(() => createApiKeysUsageTrendChart())
+})
+
+watch(accountUsageTrendData, () => {
+  nextTick(() => createAccountUsageTrendChart())
 })
 
 // 刷新所有数据
@@ -1283,6 +1560,7 @@ watch(isDarkMode, () => {
     createModelUsageChart()
     createUsageTrendChart()
     createApiKeysUsageTrendChart()
+    createAccountUsageTrendChart()
   })
 })
 
@@ -1296,6 +1574,7 @@ onMounted(async () => {
   createModelUsageChart()
   createUsageTrendChart()
   createApiKeysUsageTrendChart()
+  createAccountUsageTrendChart()
 })
 
 // 清理
@@ -1310,6 +1589,9 @@ onUnmounted(() => {
   }
   if (apiKeysUsageTrendChartInstance) {
     apiKeysUsageTrendChartInstance.destroy()
+  }
+  if (accountUsageTrendChartInstance) {
+    accountUsageTrendChartInstance.destroy()
   }
 })
 </script>

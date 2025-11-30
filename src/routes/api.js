@@ -6,19 +6,60 @@ const ccrRelayService = require('../services/ccrRelayService')
 const bedrockAccountService = require('../services/bedrockAccountService')
 const unifiedClaudeScheduler = require('../services/unifiedClaudeScheduler')
 const apiKeyService = require('../services/apiKeyService')
-const pricingService = require('../services/pricingService')
 const { authenticateApiKey } = require('../middleware/auth')
 const logger = require('../utils/logger')
-const redis = require('../models/redis')
 const { getEffectiveModel, parseVendorPrefixedModel } = require('../utils/modelHelper')
 const sessionHelper = require('../utils/sessionHelper')
-
+const { updateRateLimitCounters } = require('../utils/rateLimitHelper')
+const { sanitizeUpstreamError } = require('../utils/errorSanitizer')
 const router = express.Router()
+
+function queueRateLimitUpdate(rateLimitInfo, usageSummary, model, context = '') {
+  if (!rateLimitInfo) {
+    return Promise.resolve({ totalTokens: 0, totalCost: 0 })
+  }
+
+  const label = context ? ` (${context})` : ''
+
+  return updateRateLimitCounters(rateLimitInfo, usageSummary, model)
+    .then(({ totalTokens, totalCost }) => {
+      if (totalTokens > 0) {
+        logger.api(`📊 Updated rate limit token count${label}: +${totalTokens} tokens`)
+      }
+      if (typeof totalCost === 'number' && totalCost > 0) {
+        logger.api(`💰 Updated rate limit cost count${label}: +$${totalCost.toFixed(6)}`)
+      }
+      return { totalTokens, totalCost }
+    })
+    .catch((error) => {
+      logger.error(`❌ Failed to update rate limit counters${label}:`, error)
+      return { totalTokens: 0, totalCost: 0 }
+    })
+}
 
 // 🔧 共享的消息处理函数
 async function handleMessagesRequest(req, res) {
   try {
     const startTime = Date.now()
+
+    // Claude 服务权限校验，阻止未授权的 Key
+    if (
+      req.apiKey.permissions &&
+      req.apiKey.permissions !== 'all' &&
+      req.apiKey.permissions !== 'claude'
+    ) {
+      return res.status(403).json({
+        error: {
+          type: 'permission_error',
+          message: '此 API Key 无权访问 Claude 服务'
+        }
+      })
+    }
+
+    // 🔄 并发满额重试标志：最多重试一次（使用req对象存储状态）
+    if (req._concurrencyRetryAttempted === undefined) {
+      req._concurrencyRetryAttempted = false
+    }
 
     // 严格的输入验证
     if (!req.body || typeof req.body !== 'object') {
@@ -62,6 +103,20 @@ async function handleMessagesRequest(req, res) {
     // 检查是否为流式请求
     const isStream = req.body.stream === true
 
+    // 临时修复新版本客户端，删除context_management字段，避免报错
+    // if (req.body.context_management) {
+    //   delete req.body.context_management
+    // }
+
+    // 遍历tools数组，删除input_examples字段
+    // if (req.body.tools && Array.isArray(req.body.tools)) {
+    //   req.body.tools.forEach((tool) => {
+    //     if (tool && typeof tool === 'object' && tool.input_examples) {
+    //       delete tool.input_examples
+    //     }
+    //   })
+    // }
+
     logger.api(
       `🚀 Processing ${isStream ? 'stream' : 'non-stream'} request for key: ${req.apiKey.name}`
     )
@@ -88,11 +143,32 @@ async function handleMessagesRequest(req, res) {
 
       // 使用统一调度选择账号（传递请求的模型）
       const requestedModel = req.body.model
-      const { accountId, accountType } = await unifiedClaudeScheduler.selectAccountForApiKey(
-        req.apiKey,
-        sessionHash,
-        requestedModel
-      )
+      let accountId
+      let accountType
+      try {
+        const selection = await unifiedClaudeScheduler.selectAccountForApiKey(
+          req.apiKey,
+          sessionHash,
+          requestedModel
+        )
+        ;({ accountId, accountType } = selection)
+      } catch (error) {
+        if (error.code === 'CLAUDE_DEDICATED_RATE_LIMITED') {
+          const limitMessage = claudeRelayService._buildStandardRateLimitMessage(
+            error.rateLimitEndAt
+          )
+          res.status(403)
+          res.setHeader('Content-Type', 'application/json')
+          res.end(
+            JSON.stringify({
+              error: 'upstream_rate_limited',
+              message: limitMessage
+            })
+          )
+          return
+        }
+        throw error
+      }
 
       // 根据账号类型选择对应的转发服务并调用
       if (accountType === 'claude-official') {
@@ -156,35 +232,17 @@ async function handleMessagesRequest(req, res) {
                   logger.error('❌ Failed to record stream usage:', error)
                 })
 
-              // 更新时间窗口内的token计数和费用
-              if (req.rateLimitInfo) {
-                const totalTokens = inputTokens + outputTokens + cacheCreateTokens + cacheReadTokens
-
-                // 更新Token计数（向后兼容）
-                redis
-                  .getClient()
-                  .incrby(req.rateLimitInfo.tokenCountKey, totalTokens)
-                  .catch((error) => {
-                    logger.error('❌ Failed to update rate limit token count:', error)
-                  })
-                logger.api(`📊 Updated rate limit token count: +${totalTokens} tokens`)
-
-                // 计算并更新费用计数（新功能）
-                if (req.rateLimitInfo.costCountKey) {
-                  const costInfo = pricingService.calculateCost(usageData, model)
-                  if (costInfo.totalCost > 0) {
-                    redis
-                      .getClient()
-                      .incrbyfloat(req.rateLimitInfo.costCountKey, costInfo.totalCost)
-                      .catch((error) => {
-                        logger.error('❌ Failed to update rate limit cost count:', error)
-                      })
-                    logger.api(
-                      `💰 Updated rate limit cost count: +$${costInfo.totalCost.toFixed(6)}`
-                    )
-                  }
-                }
-              }
+              queueRateLimitUpdate(
+                req.rateLimitInfo,
+                {
+                  inputTokens,
+                  outputTokens,
+                  cacheCreateTokens,
+                  cacheReadTokens
+                },
+                model,
+                'claude-stream'
+              )
 
               usageDataCaptured = true
               logger.api(
@@ -265,35 +323,17 @@ async function handleMessagesRequest(req, res) {
                   logger.error('❌ Failed to record stream usage:', error)
                 })
 
-              // 更新时间窗口内的token计数和费用
-              if (req.rateLimitInfo) {
-                const totalTokens = inputTokens + outputTokens + cacheCreateTokens + cacheReadTokens
-
-                // 更新Token计数（向后兼容）
-                redis
-                  .getClient()
-                  .incrby(req.rateLimitInfo.tokenCountKey, totalTokens)
-                  .catch((error) => {
-                    logger.error('❌ Failed to update rate limit token count:', error)
-                  })
-                logger.api(`📊 Updated rate limit token count: +${totalTokens} tokens`)
-
-                // 计算并更新费用计数（新功能）
-                if (req.rateLimitInfo.costCountKey) {
-                  const costInfo = pricingService.calculateCost(usageData, model)
-                  if (costInfo.totalCost > 0) {
-                    redis
-                      .getClient()
-                      .incrbyfloat(req.rateLimitInfo.costCountKey, costInfo.totalCost)
-                      .catch((error) => {
-                        logger.error('❌ Failed to update rate limit cost count:', error)
-                      })
-                    logger.api(
-                      `💰 Updated rate limit cost count: +$${costInfo.totalCost.toFixed(6)}`
-                    )
-                  }
-                }
-              }
+              queueRateLimitUpdate(
+                req.rateLimitInfo,
+                {
+                  inputTokens,
+                  outputTokens,
+                  cacheCreateTokens,
+                  cacheReadTokens
+                },
+                model,
+                'claude-console-stream'
+              )
 
               usageDataCaptured = true
               logger.api(
@@ -333,33 +373,17 @@ async function handleMessagesRequest(req, res) {
                 logger.error('❌ Failed to record Bedrock stream usage:', error)
               })
 
-            // 更新时间窗口内的token计数和费用
-            if (req.rateLimitInfo) {
-              const totalTokens = inputTokens + outputTokens
-
-              // 更新Token计数（向后兼容）
-              redis
-                .getClient()
-                .incrby(req.rateLimitInfo.tokenCountKey, totalTokens)
-                .catch((error) => {
-                  logger.error('❌ Failed to update rate limit token count:', error)
-                })
-              logger.api(`📊 Updated rate limit token count: +${totalTokens} tokens`)
-
-              // 计算并更新费用计数（新功能）
-              if (req.rateLimitInfo.costCountKey) {
-                const costInfo = pricingService.calculateCost(result.usage, result.model)
-                if (costInfo.totalCost > 0) {
-                  redis
-                    .getClient()
-                    .incrbyfloat(req.rateLimitInfo.costCountKey, costInfo.totalCost)
-                    .catch((error) => {
-                      logger.error('❌ Failed to update rate limit cost count:', error)
-                    })
-                  logger.api(`💰 Updated rate limit cost count: +$${costInfo.totalCost.toFixed(6)}`)
-                }
-              }
-            }
+            queueRateLimitUpdate(
+              req.rateLimitInfo,
+              {
+                inputTokens,
+                outputTokens,
+                cacheCreateTokens: 0,
+                cacheReadTokens: 0
+              },
+              result.model,
+              'bedrock-stream'
+            )
 
             usageDataCaptured = true
             logger.api(
@@ -434,35 +458,17 @@ async function handleMessagesRequest(req, res) {
                   logger.error('❌ Failed to record CCR stream usage:', error)
                 })
 
-              // 更新时间窗口内的token计数和费用
-              if (req.rateLimitInfo) {
-                const totalTokens = inputTokens + outputTokens + cacheCreateTokens + cacheReadTokens
-
-                // 更新Token计数（向后兼容）
-                redis
-                  .getClient()
-                  .incrby(req.rateLimitInfo.tokenCountKey, totalTokens)
-                  .catch((error) => {
-                    logger.error('❌ Failed to update rate limit token count:', error)
-                  })
-                logger.api(`📊 Updated rate limit token count: +${totalTokens} tokens`)
-
-                // 计算并更新费用计数（新功能）
-                if (req.rateLimitInfo.costCountKey) {
-                  const costInfo = pricingService.calculateCost(usageData, model)
-                  if (costInfo.totalCost > 0) {
-                    redis
-                      .getClient()
-                      .incrbyfloat(req.rateLimitInfo.costCountKey, costInfo.totalCost)
-                      .catch((error) => {
-                        logger.error('❌ Failed to update rate limit cost count:', error)
-                      })
-                    logger.api(
-                      `💰 Updated rate limit cost count: +$${costInfo.totalCost.toFixed(6)}`
-                    )
-                  }
-                }
-              }
+              queueRateLimitUpdate(
+                req.rateLimitInfo,
+                {
+                  inputTokens,
+                  outputTokens,
+                  cacheCreateTokens,
+                  cacheReadTokens
+                },
+                model,
+                'ccr-stream'
+              )
 
               usageDataCaptured = true
               logger.api(
@@ -499,11 +505,27 @@ async function handleMessagesRequest(req, res) {
 
       // 使用统一调度选择账号（传递请求的模型）
       const requestedModel = req.body.model
-      const { accountId, accountType } = await unifiedClaudeScheduler.selectAccountForApiKey(
-        req.apiKey,
-        sessionHash,
-        requestedModel
-      )
+      let accountId
+      let accountType
+      try {
+        const selection = await unifiedClaudeScheduler.selectAccountForApiKey(
+          req.apiKey,
+          sessionHash,
+          requestedModel
+        )
+        ;({ accountId, accountType } = selection)
+      } catch (error) {
+        if (error.code === 'CLAUDE_DEDICATED_RATE_LIMITED') {
+          const limitMessage = claudeRelayService._buildStandardRateLimitMessage(
+            error.rateLimitEndAt
+          )
+          return res.status(403).json({
+            error: 'upstream_rate_limited',
+            message: limitMessage
+          })
+        }
+        throw error
+      }
 
       // 根据账号类型选择对应的转发服务
       let response
@@ -634,25 +656,17 @@ async function handleMessagesRequest(req, res) {
             responseAccountId
           )
 
-          // 更新时间窗口内的token计数和费用
-          if (req.rateLimitInfo) {
-            const totalTokens = inputTokens + outputTokens + cacheCreateTokens + cacheReadTokens
-
-            // 更新Token计数（向后兼容）
-            await redis.getClient().incrby(req.rateLimitInfo.tokenCountKey, totalTokens)
-            logger.api(`📊 Updated rate limit token count: +${totalTokens} tokens`)
-
-            // 计算并更新费用计数（新功能）
-            if (req.rateLimitInfo.costCountKey) {
-              const costInfo = pricingService.calculateCost(jsonData.usage, model)
-              if (costInfo.totalCost > 0) {
-                await redis
-                  .getClient()
-                  .incrbyfloat(req.rateLimitInfo.costCountKey, costInfo.totalCost)
-                logger.api(`💰 Updated rate limit cost count: +$${costInfo.totalCost.toFixed(6)}`)
-              }
-            }
-          }
+          await queueRateLimitUpdate(
+            req.rateLimitInfo,
+            {
+              inputTokens,
+              outputTokens,
+              cacheCreateTokens,
+              cacheReadTokens
+            },
+            model,
+            'claude-non-stream'
+          )
 
           usageRecorded = true
           logger.api(
@@ -681,9 +695,75 @@ async function handleMessagesRequest(req, res) {
     logger.api(`✅ Request completed in ${duration}ms for key: ${req.apiKey.name}`)
     return undefined
   } catch (error) {
-    logger.error('❌ Claude relay error:', error.message, {
-      code: error.code,
-      stack: error.stack
+    let handledError = error
+
+    // 🔄 并发满额降级处理：捕获CONSOLE_ACCOUNT_CONCURRENCY_FULL错误
+    if (
+      handledError.code === 'CONSOLE_ACCOUNT_CONCURRENCY_FULL' &&
+      !req._concurrencyRetryAttempted
+    ) {
+      req._concurrencyRetryAttempted = true
+      logger.warn(
+        `⚠️ Console account ${handledError.accountId} concurrency full, attempting fallback to other accounts...`
+      )
+
+      // 只有在响应头未发送时才能重试
+      if (!res.headersSent) {
+        try {
+          // 清理粘性会话映射（如果存在）
+          const sessionHash = sessionHelper.generateSessionHash(req.body)
+          await unifiedClaudeScheduler.clearSessionMapping(sessionHash)
+
+          logger.info('🔄 Session mapping cleared, retrying handleMessagesRequest...')
+
+          // 递归重试整个请求处理（会选择新账户）
+          return await handleMessagesRequest(req, res)
+        } catch (retryError) {
+          // 重试失败
+          if (retryError.code === 'CONSOLE_ACCOUNT_CONCURRENCY_FULL') {
+            logger.error('❌ All Console accounts reached concurrency limit after retry')
+            return res.status(503).json({
+              error: 'service_unavailable',
+              message:
+                'All available Claude Console accounts have reached their concurrency limit. Please try again later.'
+            })
+          }
+          // 其他错误继续向下处理
+          handledError = retryError
+        }
+      } else {
+        // 响应头已发送，无法重试
+        logger.error('❌ Cannot retry concurrency full error - response headers already sent')
+        if (!res.destroyed && !res.finished) {
+          res.end()
+        }
+        return undefined
+      }
+    }
+
+    // 🚫 第二次并发满额错误：已经重试过，直接返回503
+    if (
+      handledError.code === 'CONSOLE_ACCOUNT_CONCURRENCY_FULL' &&
+      req._concurrencyRetryAttempted
+    ) {
+      logger.error('❌ All Console accounts reached concurrency limit (retry already attempted)')
+      if (!res.headersSent) {
+        return res.status(503).json({
+          error: 'service_unavailable',
+          message:
+            'All available Claude Console accounts have reached their concurrency limit. Please try again later.'
+        })
+      } else {
+        if (!res.destroyed && !res.finished) {
+          res.end()
+        }
+        return undefined
+      }
+    }
+
+    logger.error('❌ Claude relay error:', handledError.message, {
+      code: handledError.code,
+      stack: handledError.stack
     })
 
     // 确保在任何情况下都能返回有效的JSON响应
@@ -692,23 +772,29 @@ async function handleMessagesRequest(req, res) {
       let statusCode = 500
       let errorType = 'Relay service error'
 
-      if (error.message.includes('Connection reset') || error.message.includes('socket hang up')) {
+      if (
+        handledError.message.includes('Connection reset') ||
+        handledError.message.includes('socket hang up')
+      ) {
         statusCode = 502
         errorType = 'Upstream connection error'
-      } else if (error.message.includes('Connection refused')) {
+      } else if (handledError.message.includes('Connection refused')) {
         statusCode = 502
         errorType = 'Upstream service unavailable'
-      } else if (error.message.includes('timeout')) {
+      } else if (handledError.message.includes('timeout')) {
         statusCode = 504
         errorType = 'Upstream timeout'
-      } else if (error.message.includes('resolve') || error.message.includes('ENOTFOUND')) {
+      } else if (
+        handledError.message.includes('resolve') ||
+        handledError.message.includes('ENOTFOUND')
+      ) {
         statusCode = 502
         errorType = 'Upstream hostname resolution failed'
       }
 
       return res.status(statusCode).json({
         error: errorType,
-        message: error.message || 'An unexpected error occurred',
+        message: handledError.message || 'An unexpected error occurred',
         timestamp: new Date().toISOString()
       })
     } else {
@@ -727,40 +813,23 @@ router.post('/v1/messages', authenticateApiKey, handleMessagesRequest)
 // 🚀 Claude API messages 端点 - /claude/v1/messages (别名)
 router.post('/claude/v1/messages', authenticateApiKey, handleMessagesRequest)
 
-// 📋 模型列表端点 - Claude Code 客户端需要
+// 📋 模型列表端点 - 支持 Claude, OpenAI, Gemini
 router.get('/v1/models', authenticateApiKey, async (req, res) => {
   try {
-    // 返回支持的模型列表
-    const models = [
-      {
-        id: 'claude-3-5-sonnet-20241022',
-        object: 'model',
-        created: 1669599635,
-        owned_by: 'anthropic'
-      },
-      {
-        id: 'claude-3-5-haiku-20241022',
-        object: 'model',
-        created: 1669599635,
-        owned_by: 'anthropic'
-      },
-      {
-        id: 'claude-3-opus-20240229',
-        object: 'model',
-        created: 1669599635,
-        owned_by: 'anthropic'
-      },
-      {
-        id: 'claude-sonnet-4-20250514',
-        object: 'model',
-        created: 1669599635,
-        owned_by: 'anthropic'
-      }
-    ]
+    const modelService = require('../services/modelService')
+
+    // 从 modelService 获取所有支持的模型
+    const models = modelService.getAllModels()
+
+    // 可选：根据 API Key 的模型限制过滤
+    let filteredModels = models
+    if (req.apiKey.enableModelRestriction && req.apiKey.restrictedModels?.length > 0) {
+      filteredModels = models.filter((model) => req.apiKey.restrictedModels.includes(model.id))
+    }
 
     res.json({
       object: 'list',
-      data: models
+      data: filteredModels
     })
   } catch (error) {
     logger.error('❌ Models list error:', error)
@@ -882,84 +951,85 @@ router.get('/v1/organizations/:org_id/usage', authenticateApiKey, async (req, re
 
 // 🔢 Token计数端点 - count_tokens beta API
 router.post('/v1/messages/count_tokens', authenticateApiKey, async (req, res) => {
-  try {
-    // 检查权限
-    if (
-      req.apiKey.permissions &&
-      req.apiKey.permissions !== 'all' &&
-      req.apiKey.permissions !== 'claude'
-    ) {
-      return res.status(403).json({
-        error: {
-          type: 'permission_error',
-          message: 'This API key does not have permission to access Claude'
-        }
-      })
-    }
+  // 检查权限
+  if (
+    req.apiKey.permissions &&
+    req.apiKey.permissions !== 'all' &&
+    req.apiKey.permissions !== 'claude'
+  ) {
+    return res.status(403).json({
+      error: {
+        type: 'permission_error',
+        message: 'This API key does not have permission to access Claude'
+      }
+    })
+  }
 
-    logger.info(`🔢 Processing token count request for key: ${req.apiKey.name}`)
+  logger.info(`🔢 Processing token count request for key: ${req.apiKey.name}`)
 
-    // 生成会话哈希用于sticky会话
-    const sessionHash = sessionHelper.generateSessionHash(req.body)
+  const sessionHash = sessionHelper.generateSessionHash(req.body)
+  const requestedModel = req.body.model
+  const maxAttempts = 2
+  let attempt = 0
 
-    // 选择可用的Claude账户
-    const requestedModel = req.body.model
+  const processRequest = async () => {
     const { accountId, accountType } = await unifiedClaudeScheduler.selectAccountForApiKey(
       req.apiKey,
       sessionHash,
       requestedModel
     )
 
-    let response
-    if (accountType === 'claude-official') {
-      // 使用官方Claude账号转发count_tokens请求
-      response = await claudeRelayService.relayRequest(
-        req.body,
-        req.apiKey,
-        req,
-        res,
-        req.headers,
-        {
-          skipUsageRecord: true, // 跳过usage记录，这只是计数请求
-          customPath: '/v1/messages/count_tokens' // 指定count_tokens路径
-        }
-      )
-    } else if (accountType === 'claude-console') {
-      // 使用Console Claude账号转发count_tokens请求
-      response = await claudeConsoleRelayService.relayRequest(
-        req.body,
-        req.apiKey,
-        req,
-        res,
-        req.headers,
-        accountId,
-        {
-          skipUsageRecord: true, // 跳过usage记录，这只是计数请求
-          customPath: '/v1/messages/count_tokens' // 指定count_tokens路径
-        }
-      )
-    } else if (accountType === 'ccr') {
-      // CCR不支持count_tokens
-      return res.status(501).json({
-        error: {
-          type: 'not_supported',
-          message: 'Token counting is not supported for CCR accounts'
-        }
-      })
-    } else {
-      // Bedrock不支持count_tokens
-      return res.status(501).json({
-        error: {
-          type: 'not_supported',
-          message: 'Token counting is not supported for Bedrock accounts'
+    if (accountType === 'ccr') {
+      throw Object.assign(new Error('Token counting is not supported for CCR accounts'), {
+        httpStatus: 501,
+        errorPayload: {
+          error: {
+            type: 'not_supported',
+            message: 'Token counting is not supported for CCR accounts'
+          }
         }
       })
     }
 
-    // 直接返回响应，不记录token使用量
+    if (accountType === 'bedrock') {
+      throw Object.assign(new Error('Token counting is not supported for Bedrock accounts'), {
+        httpStatus: 501,
+        errorPayload: {
+          error: {
+            type: 'not_supported',
+            message: 'Token counting is not supported for Bedrock accounts'
+          }
+        }
+      })
+    }
+
+    const relayOptions = {
+      skipUsageRecord: true,
+      customPath: '/v1/messages/count_tokens'
+    }
+
+    const response =
+      accountType === 'claude-official'
+        ? await claudeRelayService.relayRequest(
+            req.body,
+            req.apiKey,
+            req,
+            res,
+            req.headers,
+            relayOptions
+          )
+        : await claudeConsoleRelayService.relayRequest(
+            req.body,
+            req.apiKey,
+            req,
+            res,
+            req.headers,
+            accountId,
+            relayOptions
+          )
+
     res.status(response.statusCode)
 
-    // 设置响应头
     const skipHeaders = ['content-encoding', 'transfer-encoding', 'content-length']
     Object.keys(response.headers).forEach((key) => {
       if (!skipHeaders.includes(key.toLowerCase())) {
@@ -967,24 +1037,97 @@ router.post('/v1/messages/count_tokens', authenticateApiKey, async (req, res) =>
       }
     })
 
-    // 尝试解析并返回JSON响应
     try {
       const jsonData = JSON.parse(response.body)
-      res.json(jsonData)
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        const sanitizedData = sanitizeUpstreamError(jsonData)
+        res.json(sanitizedData)
+      } else {
+        res.json(jsonData)
+      }
     } catch (parseError) {
       res.send(response.body)
     }
 
     logger.info(`✅ Token count request completed for key: ${req.apiKey.name}`)
-  } catch (error) {
-    logger.error('❌ Token count error:', error)
-    res.status(500).json({
-      error: {
-        type: 'server_error',
-        message: 'Failed to count tokens'
+  }
+
+  while (attempt < maxAttempts) {
+    try {
+      await processRequest()
+      return
+    } catch (error) {
+      if (error.code === 'CONSOLE_ACCOUNT_CONCURRENCY_FULL') {
+        logger.warn(
+          `⚠️ Console account concurrency full during count_tokens (attempt ${attempt + 1}/${maxAttempts})`
+        )
+        if (attempt < maxAttempts - 1) {
+          try {
+            await unifiedClaudeScheduler.clearSessionMapping(sessionHash)
+          } catch (clearError) {
+            logger.error('❌ Failed to clear session mapping for count_tokens retry:', clearError)
+            if (!res.headersSent) {
+              return res.status(500).json({
+                error: {
+                  type: 'server_error',
+                  message: 'Failed to count tokens'
+                }
+              })
+            }
+            if (!res.destroyed && !res.finished) {
+              res.end()
+            }
+            return
+          }
+          attempt += 1
+          continue
+        }
+        if (!res.headersSent) {
+          return res.status(503).json({
+            error: 'service_unavailable',
+            message:
+              'All available Claude Console accounts have reached their concurrency limit. Please try again later.'
+          })
+        }
+        if (!res.destroyed && !res.finished) {
+          res.end()
+        }
+        return
       }
-    })
+
+      if (error.httpStatus) {
+        return res.status(error.httpStatus).json(error.errorPayload)
+      }
+
+      // 客户端断开连接不是错误，使用 INFO 级别
+      if (error.message === 'Client disconnected') {
+        logger.info('🔌 Client disconnected during token count request')
+        if (!res.headersSent) {
+          return res.status(499).end() // 499 Client Closed Request
+        }
+        if (!res.destroyed && !res.finished) {
+          res.end()
+        }
+        return
+      }
+
+      logger.error('❌ Token count error:', error)
+      if (!res.headersSent) {
+        return res.status(500).json({
+          error: {
+            type: 'server_error',
+            message: 'Failed to count tokens'
+          }
+        })
+      }
+
+      if (!res.destroyed && !res.finished) {
+        res.end()
+      }
+      return
+    }
   }
 })
 
 module.exports = router
+module.exports.handleMessagesRequest = handleMessagesRequest

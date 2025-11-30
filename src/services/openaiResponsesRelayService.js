@@ -7,6 +7,32 @@ const unifiedOpenAIScheduler = require('./unifiedOpenAIScheduler')
 const config = require('../../config/config')
 const crypto = require('crypto')
 
+// 抽取缓存写入 token，兼容多种字段命名
+function extractCacheCreationTokens(usageData) {
+  if (!usageData || typeof usageData !== 'object') {
+    return 0
+  }
+
+  const details = usageData.input_tokens_details || usageData.prompt_tokens_details || {}
+  const candidates = [
+    details.cache_creation_input_tokens,
+    details.cache_creation_tokens,
+    usageData.cache_creation_input_tokens,
+    usageData.cache_creation_tokens
+  ]
+
+  for (const value of candidates) {
+    if (value !== undefined && value !== null && value !== '') {
+      const parsed = Number(value)
+      if (!Number.isNaN(parsed)) {
+        return parsed
+      }
+    }
+  }
+
+  return 0
+}
+
 class OpenAIResponsesRelayService {
   constructor() {
     this.defaultTimeout = config.requestTimeout || 600000
@@ -81,6 +107,7 @@ class OpenAIResponsesRelayService {
       if (fullAccount.proxy) {
         const proxyAgent = ProxyHelper.createProxyAgent(fullAccount.proxy)
         if (proxyAgent) {
+          requestOptions.httpAgent = proxyAgent
           requestOptions.httpsAgent = proxyAgent
           requestOptions.proxy = false
           logger.info(
@@ -169,6 +196,61 @@ class OpenAIResponsesRelayService {
           errorData
         })
 
+        if (response.status === 401) {
+          let reason = 'OpenAI Responses账号认证失败（401错误）'
+          if (errorData) {
+            if (typeof errorData === 'string' && errorData.trim()) {
+              reason = `OpenAI Responses账号认证失败（401错误）：${errorData.trim()}`
+            } else if (
+              errorData.error &&
+              typeof errorData.error.message === 'string' &&
+              errorData.error.message.trim()
+            ) {
+              reason = `OpenAI Responses账号认证失败（401错误）：${errorData.error.message.trim()}`
+            } else if (typeof errorData.message === 'string' && errorData.message.trim()) {
+              reason = `OpenAI Responses账号认证失败（401错误）：${errorData.message.trim()}`
+            }
+          }
+
+          try {
+            await unifiedOpenAIScheduler.markAccountUnauthorized(
+              account.id,
+              'openai-responses',
+              sessionHash,
+              reason
+            )
+          } catch (markError) {
+            logger.error(
+              '❌ Failed to mark OpenAI-Responses account unauthorized after 401:',
+              markError
+            )
+          }
+
+          let unauthorizedResponse = errorData
+          if (
+            !unauthorizedResponse ||
+            typeof unauthorizedResponse !== 'object' ||
+            unauthorizedResponse.pipe ||
+            Buffer.isBuffer(unauthorizedResponse)
+          ) {
+            const fallbackMessage =
+              typeof errorData === 'string' && errorData.trim() ? errorData.trim() : 'Unauthorized'
+            unauthorizedResponse = {
+              error: {
+                message: fallbackMessage,
+                type: 'unauthorized',
+                code: 'unauthorized'
+              }
+            }
+          }
+
+          // 清理监听器
+          req.removeListener('close', handleClientDisconnect)
+          res.removeListener('close', handleClientDisconnect)
+
+          return res.status(401).json(unauthorizedResponse)
+        }
+
         // 清理监听器
         req.removeListener('close', handleClientDisconnect)
         res.removeListener('close', handleClientDisconnect)
@@ -248,6 +330,57 @@ class OpenAIResponsesRelayService {
               errorData.error.message = error.response.data
             }
           }
+        }
+
+        if (status === 401) {
+          let reason = 'OpenAI Responses账号认证失败（401错误）'
+          if (errorData) {
+            if (typeof errorData === 'string' && errorData.trim()) {
+              reason = `OpenAI Responses账号认证失败（401错误）：${errorData.trim()}`
+            } else if (
+              errorData.error &&
+              typeof errorData.error.message === 'string' &&
+              errorData.error.message.trim()
+            ) {
+              reason = `OpenAI Responses账号认证失败（401错误）：${errorData.error.message.trim()}`
+            } else if (typeof errorData.message === 'string' && errorData.message.trim()) {
+              reason = `OpenAI Responses账号认证失败（401错误）：${errorData.message.trim()}`
+            }
+          }
+
+          try {
+            await unifiedOpenAIScheduler.markAccountUnauthorized(
+              account.id,
+              'openai-responses',
+              sessionHash,
+              reason
+            )
+          } catch (markError) {
+            logger.error(
+              '❌ Failed to mark OpenAI-Responses account unauthorized in catch handler:',
+              markError
+            )
+          }
+
+          let unauthorizedResponse = errorData
+          if (
+            !unauthorizedResponse ||
+            typeof unauthorizedResponse !== 'object' ||
+            unauthorizedResponse.pipe ||
+            Buffer.isBuffer(unauthorizedResponse)
+          ) {
+            const fallbackMessage =
+              typeof errorData === 'string' && errorData.trim() ? errorData.trim() : 'Unauthorized'
+            unauthorizedResponse = {
+              error: {
+                message: fallbackMessage,
+                type: 'unauthorized',
+                code: 'unauthorized'
+              }
+            }
+          }
+
+          return res.status(401).json(unauthorizedResponse)
         }
 
         return res.status(status).json(errorData)
@@ -385,19 +518,22 @@ class OpenAIResponsesRelayService {
       if (usageData) {
         try {
           // OpenAI-Responses 使用 input_tokens/output_tokens，标准 OpenAI 使用 prompt_tokens/completion_tokens
-          const inputTokens = usageData.input_tokens || usageData.prompt_tokens || 0
+          const totalInputTokens = usageData.input_tokens || usageData.prompt_tokens || 0
           const outputTokens = usageData.output_tokens || usageData.completion_tokens || 0
 
           // 提取缓存相关的 tokens（如果存在）
-          const cacheCreateTokens = usageData.input_tokens_details?.cache_creation_tokens || 0
           const cacheReadTokens = usageData.input_tokens_details?.cached_tokens || 0
+          const cacheCreateTokens = extractCacheCreationTokens(usageData)
+          // 计算实际输入token（总输入减去缓存部分）
+          const actualInputTokens = Math.max(0, totalInputTokens - cacheReadTokens)
 
-          const totalTokens = usageData.total_tokens || inputTokens + outputTokens
+          const totalTokens =
+            usageData.total_tokens || totalInputTokens + outputTokens + cacheCreateTokens
           const modelToRecord = actualModel || requestedModel || 'gpt-4'
 
           await apiKeyService.recordUsage(
             apiKeyData.id,
-            inputTokens,
+            actualInputTokens, // 传递实际输入（不含缓存）
             outputTokens,
             cacheCreateTokens,
             cacheReadTokens,
@@ -406,7 +542,7 @@ class OpenAIResponsesRelayService {
           )
 
           logger.info(
-            `📊 Recorded usage - Input: ${inputTokens}, Output: ${outputTokens}, CacheRead: ${cacheReadTokens}, CacheCreate: ${cacheCreateTokens}, Total: ${totalTokens}, Model: ${modelToRecord}`
+            `📊 Recorded usage - Input: ${totalInputTokens}(actual:${actualInputTokens}+cached:${cacheReadTokens}), CacheCreate: ${cacheCreateTokens}, Output: ${outputTokens}, Total: ${totalTokens}, Model: ${modelToRecord}`
           )
 
           // 更新账户的 token 使用统计
@@ -414,9 +550,18 @@ class OpenAIResponsesRelayService {
 
           // 更新账户使用额度（如果设置了额度限制）
           if (parseFloat(account.dailyQuota) > 0) {
-            // 估算费用（根据模型和token数量）
-            const estimatedCost = this._estimateCost(modelToRecord, inputTokens, outputTokens)
-            await openaiResponsesAccountService.updateUsageQuota(account.id, estimatedCost)
+            // 使用CostCalculator正确计算费用（考虑缓存token的不同价格）
+            const CostCalculator = require('../utils/costCalculator')
+            const costInfo = CostCalculator.calculateCost(
+              {
+                input_tokens: actualInputTokens, // 实际输入（不含缓存）
+                output_tokens: outputTokens,
+                cache_creation_input_tokens: cacheCreateTokens,
+                cache_read_input_tokens: cacheReadTokens
+              },
+              modelToRecord
+            )
+            await openaiResponsesAccountService.updateUsageQuota(account.id, costInfo.costs.total)
           }
         } catch (error) {
           logger.error('Failed to record usage:', error)
@@ -502,18 +647,21 @@ class OpenAIResponsesRelayService {
     if (usageData) {
       try {
         // OpenAI-Responses 使用 input_tokens/output_tokens，标准 OpenAI 使用 prompt_tokens/completion_tokens
-        const inputTokens = usageData.input_tokens || usageData.prompt_tokens || 0
+        const totalInputTokens = usageData.input_tokens || usageData.prompt_tokens || 0
         const outputTokens = usageData.output_tokens || usageData.completion_tokens || 0
 
         // 提取缓存相关的 tokens（如果存在）
-        const cacheCreateTokens = usageData.input_tokens_details?.cache_creation_tokens || 0
         const cacheReadTokens = usageData.input_tokens_details?.cached_tokens || 0
+        const cacheCreateTokens = extractCacheCreationTokens(usageData)
+        // 计算实际输入token（总输入减去缓存部分）
+        const actualInputTokens = Math.max(0, totalInputTokens - cacheReadTokens)
 
-        const totalTokens = usageData.total_tokens || inputTokens + outputTokens
+        const totalTokens =
+          usageData.total_tokens || totalInputTokens + outputTokens + cacheCreateTokens
 
         await apiKeyService.recordUsage(
           apiKeyData.id,
-          inputTokens,
+          actualInputTokens, // 传递实际输入（不含缓存）
           outputTokens,
           cacheCreateTokens,
           cacheReadTokens,
@@ -522,7 +670,7 @@ class OpenAIResponsesRelayService {
         )
 
         logger.info(
-          `📊 Recorded non-stream usage - Input: ${inputTokens}, Output: ${outputTokens}, CacheRead: ${cacheReadTokens}, CacheCreate: ${cacheCreateTokens}, Total: ${totalTokens}, Model: ${actualModel}`
+          `📊 Recorded non-stream usage - Input: ${totalInputTokens}(actual:${actualInputTokens}+cached:${cacheReadTokens}), CacheCreate: ${cacheCreateTokens}, Output: ${outputTokens}, Total: ${totalTokens}, Model: ${actualModel}`
         )
 
         // 更新账户的 token 使用统计
@@ -530,9 +678,18 @@ class OpenAIResponsesRelayService {
 
         // 更新账户使用额度（如果设置了额度限制）
         if (parseFloat(account.dailyQuota) > 0) {
-          // 估算费用（根据模型和token数量）
-          const estimatedCost = this._estimateCost(actualModel, inputTokens, outputTokens)
-          await openaiResponsesAccountService.updateUsageQuota(account.id, estimatedCost)
+          // 使用CostCalculator正确计算费用（考虑缓存token的不同价格）
+          const CostCalculator = require('../utils/costCalculator')
+          const costInfo = CostCalculator.calculateCost(
+            {
+              input_tokens: actualInputTokens, // 实际输入（不含缓存）
+              output_tokens: outputTokens,
+              cache_creation_input_tokens: cacheCreateTokens,
+              cache_read_input_tokens: cacheReadTokens
+            },
+            actualModel
+          )
+          await openaiResponsesAccountService.updateUsageQuota(account.id, costInfo.costs.total)
         }
       } catch (error) {
         logger.error('Failed to record usage:', error)

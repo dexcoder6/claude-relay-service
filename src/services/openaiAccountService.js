@@ -115,6 +115,85 @@ setInterval(
   10 * 60 * 1000
 )
 
+function toNumberOrNull(value) {
+  if (value === undefined || value === null || value === '') {
+    return null
+  }
+
+  const num = Number(value)
+  return Number.isFinite(num) ? num : null
+}
+
+function computeResetMeta(updatedAt, resetAfterSeconds) {
+  if (!updatedAt || resetAfterSeconds === null || resetAfterSeconds === undefined) {
+    return {
+      resetAt: null,
+      remainingSeconds: null
+    }
+  }
+
+  const updatedMs = Date.parse(updatedAt)
+  if (Number.isNaN(updatedMs)) {
+    return {
+      resetAt: null,
+      remainingSeconds: null
+    }
+  }
+
+  const resetMs = updatedMs + resetAfterSeconds * 1000
+  return {
+    resetAt: new Date(resetMs).toISOString(),
+    remainingSeconds: Math.max(0, Math.round((resetMs - Date.now()) / 1000))
+  }
+}
+
+function buildCodexUsageSnapshot(accountData) {
+  const updatedAt = accountData.codexUsageUpdatedAt
+
+  const primaryUsedPercent = toNumberOrNull(accountData.codexPrimaryUsedPercent)
+  const primaryResetAfterSeconds = toNumberOrNull(accountData.codexPrimaryResetAfterSeconds)
+  const primaryWindowMinutes = toNumberOrNull(accountData.codexPrimaryWindowMinutes)
+  const secondaryUsedPercent = toNumberOrNull(accountData.codexSecondaryUsedPercent)
+  const secondaryResetAfterSeconds = toNumberOrNull(accountData.codexSecondaryResetAfterSeconds)
+  const secondaryWindowMinutes = toNumberOrNull(accountData.codexSecondaryWindowMinutes)
+  const overSecondaryPercent = toNumberOrNull(accountData.codexPrimaryOverSecondaryLimitPercent)
+
+  const hasPrimaryData =
+    primaryUsedPercent !== null ||
+    primaryResetAfterSeconds !== null ||
+    primaryWindowMinutes !== null
+  const hasSecondaryData =
+    secondaryUsedPercent !== null ||
+    secondaryResetAfterSeconds !== null ||
+    secondaryWindowMinutes !== null
+
+  if (!updatedAt && !hasPrimaryData && !hasSecondaryData) {
+    return null
+  }
+
+  const primaryMeta = computeResetMeta(updatedAt, primaryResetAfterSeconds)
+  const secondaryMeta = computeResetMeta(updatedAt, secondaryResetAfterSeconds)
+
+  return {
+    updatedAt,
+    primary: {
+      usedPercent: primaryUsedPercent,
+      resetAfterSeconds: primaryResetAfterSeconds,
+      windowMinutes: primaryWindowMinutes,
+      resetAt: primaryMeta.resetAt,
+      remainingSeconds: primaryMeta.remainingSeconds
+    },
+    secondary: {
+      usedPercent: secondaryUsedPercent,
+      resetAfterSeconds: secondaryResetAfterSeconds,
+      windowMinutes: secondaryWindowMinutes,
+      resetAt: secondaryMeta.resetAt,
+      remainingSeconds: secondaryMeta.remainingSeconds
+    },
+    primaryOverSecondaryPercent: overSecondaryPercent
+  }
+}
+
 // 刷新访问令牌
 async function refreshAccessToken(refreshToken, proxy = null) {
   try {
@@ -144,8 +223,9 @@ async function refreshAccessToken(refreshToken, proxy = null) {
     // 配置代理（如果有）
     const proxyAgent = ProxyHelper.createProxyAgent(proxy)
     if (proxyAgent) {
+      requestOptions.httpAgent = proxyAgent
       requestOptions.httpsAgent = proxyAgent
-      requestOptions.proxy = false // 重要：禁用 axios 的默认代理，强制使用我们的 httpsAgent
+      requestOptions.proxy = false
       logger.info(
         `🌐 Using proxy for OpenAI token refresh: ${ProxyHelper.getProxyDescription(proxy)}`
       )
@@ -253,6 +333,19 @@ function isTokenExpired(account) {
     return false
   }
   return new Date(account.expiresAt) <= new Date()
+}
+
+/**
+ * 检查账户订阅是否过期
+ * @param {Object} account - 账户对象
+ * @returns {boolean} - true: 已过期, false: 未过期
+ */
+function isSubscriptionExpired(account) {
+  if (!account.subscriptionExpiresAt) {
+    return false // 未设置视为永不过期
+  }
+  const expiryDate = new Date(account.subscriptionExpiresAt)
+  return expiryDate <= new Date()
 }
 
 // 刷新账户的 access token（带分布式锁）
@@ -476,7 +569,11 @@ async function createAccount(accountData) {
     // 过期时间
     expiresAt: oauthData.expires_in
       ? new Date(Date.now() + oauthData.expires_in * 1000).toISOString()
-      : new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString(), // 默认1年
+      : new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString(), // OAuth Token 过期时间（技术字段）
+
+    // ✅ 新增：账户订阅到期时间（业务字段，手动管理）
+    subscriptionExpiresAt: accountData.subscriptionExpiresAt || null,
+
     // 状态字段
     isActive: accountData.isActive !== false ? 'true' : 'false',
     status: 'active',
@@ -583,6 +680,12 @@ async function updateAccount(accountId, updates) {
       typeof updates.proxy === 'string' ? updates.proxy : JSON.stringify(updates.proxy)
   }
 
+  // ✅ 如果通过路由映射更新了 subscriptionExpiresAt，直接保存
+  // subscriptionExpiresAt 是业务字段，与 token 刷新独立
+  if (updates.subscriptionExpiresAt !== undefined) {
+    // 直接保存，不做任何调整
+  }
+
   // 更新账户类型时处理共享账户集合
   const client = redisClient.getClientSafe()
   if (updates.accountType && updates.accountType !== existingAccount.accountType) {
@@ -650,6 +753,8 @@ async function getAllAccounts() {
   for (const key of keys) {
     const accountData = await client.hgetall(key)
     if (accountData && Object.keys(accountData).length > 0) {
+      const codexUsage = buildCodexUsageSnapshot(accountData)
+
       // 解密敏感数据（但不返回给前端）
       if (accountData.email) {
         accountData.email = decrypt(accountData.email)
@@ -657,12 +762,24 @@ async function getAllAccounts() {
 
       // 先保存 refreshToken 是否存在的标记
       const hasRefreshTokenFlag = !!accountData.refreshToken
+      const maskedAccessToken = accountData.accessToken ? '[ENCRYPTED]' : ''
+      const maskedRefreshToken = accountData.refreshToken ? '[ENCRYPTED]' : ''
+      const maskedOauth = accountData.openaiOauth ? '[ENCRYPTED]' : ''
 
       // 屏蔽敏感信息（token等不应该返回给前端）
       delete accountData.idToken
       delete accountData.accessToken
       delete accountData.refreshToken
       delete accountData.openaiOauth
+      delete accountData.codexPrimaryUsedPercent
+      delete accountData.codexPrimaryResetAfterSeconds
+      delete accountData.codexPrimaryWindowMinutes
+      delete accountData.codexSecondaryUsedPercent
+      delete accountData.codexSecondaryResetAfterSeconds
+      delete accountData.codexSecondaryWindowMinutes
+      delete accountData.codexPrimaryOverSecondaryLimitPercent
+      // 时间戳改由 codexUsage.updatedAt 暴露
+      delete accountData.codexUsageUpdatedAt
 
       // 获取限流状态信息
       const rateLimitInfo = await getAccountRateLimitInfo(accountData.id)
@@ -671,24 +788,32 @@ async function getAllAccounts() {
       if (accountData.proxy) {
         try {
           accountData.proxy = JSON.parse(accountData.proxy)
-          // 屏蔽代理密码
-          if (accountData.proxy && accountData.proxy.password) {
-            accountData.proxy.password = '******'
-          }
         } catch (e) {
           // 如果解析失败，设置为null
           accountData.proxy = null
         }
       }
 
+      const tokenExpiresAt = accountData.expiresAt || null
+      const subscriptionExpiresAt =
+        accountData.subscriptionExpiresAt && accountData.subscriptionExpiresAt !== ''
+          ? accountData.subscriptionExpiresAt
+          : null
+
       // 不解密敏感字段，只返回基本信息
       accounts.push({
         ...accountData,
         isActive: accountData.isActive === 'true',
         schedulable: accountData.schedulable !== 'false',
-        openaiOauth: accountData.openaiOauth ? '[ENCRYPTED]' : '',
-        accessToken: accountData.accessToken ? '[ENCRYPTED]' : '',
-        refreshToken: accountData.refreshToken ? '[ENCRYPTED]' : '',
+        openaiOauth: maskedOauth,
+        accessToken: maskedAccessToken,
+        refreshToken: maskedRefreshToken,
+
+        // ✅ 前端显示订阅过期时间（业务字段）
+        tokenExpiresAt,
+        subscriptionExpiresAt,
+        expiresAt: subscriptionExpiresAt,
+
         // 添加 scopes 字段用于判断认证方式
         // 处理空字符串的情况
         scopes:
@@ -698,20 +823,66 @@ async function getAllAccounts() {
         // 添加限流状态信息（统一格式）
         rateLimitStatus: rateLimitInfo
           ? {
+              status: rateLimitInfo.status,
               isRateLimited: rateLimitInfo.isRateLimited,
               rateLimitedAt: rateLimitInfo.rateLimitedAt,
+              rateLimitResetAt: rateLimitInfo.rateLimitResetAt,
               minutesRemaining: rateLimitInfo.minutesRemaining
             }
           : {
+              status: 'normal',
               isRateLimited: false,
               rateLimitedAt: null,
+              rateLimitResetAt: null,
               minutesRemaining: 0
-            }
+            },
+        codexUsage
       })
     }
   }
 
   return accounts
+}
+
+// 获取单个账户的概要信息（用于外部展示基本状态）
+async function getAccountOverview(accountId) {
+  const client = redisClient.getClientSafe()
+  const accountData = await client.hgetall(`${OPENAI_ACCOUNT_KEY_PREFIX}${accountId}`)
+
+  if (!accountData || Object.keys(accountData).length === 0) {
+    return null
+  }
+
+  const codexUsage = buildCodexUsageSnapshot(accountData)
+  const rateLimitInfo = await getAccountRateLimitInfo(accountId)
+
+  if (accountData.proxy) {
+    try {
+      accountData.proxy = JSON.parse(accountData.proxy)
+    } catch (error) {
+      accountData.proxy = null
+    }
+  }
+
+  const scopes =
+    accountData.scopes && accountData.scopes.trim() ? accountData.scopes.split(' ') : []
+
+  return {
+    id: accountData.id,
+    accountType: accountData.accountType || 'shared',
+    platform: accountData.platform || 'openai',
+    isActive: accountData.isActive === 'true',
+    schedulable: accountData.schedulable !== 'false',
+    rateLimitStatus: rateLimitInfo || {
+      status: 'normal',
+      isRateLimited: false,
+      rateLimitedAt: null,
+      rateLimitResetAt: null,
+      minutesRemaining: 0
+    },
+    codexUsage,
+    scopes
+  }
 }
 
 // 选择可用账户（支持专属和共享账户）
@@ -767,8 +938,17 @@ async function selectAvailableAccount(apiKeyId, sessionHash = null) {
 
   for (const accountId of sharedAccountIds) {
     const account = await getAccount(accountId)
-    if (account && account.isActive === 'true' && !isRateLimited(account)) {
+    if (
+      account &&
+      account.isActive === 'true' &&
+      !isRateLimited(account) &&
+      !isSubscriptionExpired(account)
+    ) {
       availableAccounts.push(account)
+    } else if (account && isSubscriptionExpired(account)) {
+      logger.debug(
+        `⏰ Skipping expired OpenAI account: ${account.name}, expired at ${account.subscriptionExpiresAt}`
+      )
     }
   }
 
@@ -869,6 +1049,49 @@ async function setAccountRateLimited(accountId, isLimited, resetsInSeconds = nul
   }
 }
 
+// 🚫 标记账户为未授权状态（401错误）
+async function markAccountUnauthorized(accountId, reason = 'OpenAI账号认证失败（401错误）') {
+  const account = await getAccount(accountId)
+  if (!account) {
+    throw new Error('Account not found')
+  }
+
+  const now = new Date().toISOString()
+  const currentCount = parseInt(account.unauthorizedCount || '0', 10)
+  const unauthorizedCount = Number.isFinite(currentCount) ? currentCount + 1 : 1
+
+  const updates = {
+    status: 'unauthorized',
+    schedulable: 'false',
+    errorMessage: reason,
+    unauthorizedAt: now,
+    unauthorizedCount: unauthorizedCount.toString()
+  }
+
+  await updateAccount(accountId, updates)
+  logger.warn(
+    `🚫 Marked OpenAI account ${account.name || accountId} as unauthorized due to 401 error`
+  )
+
+  try {
+    const webhookNotifier = require('../utils/webhookNotifier')
+    await webhookNotifier.sendAccountAnomalyNotification({
+      accountId,
+      accountName: account.name || accountId,
+      platform: 'openai',
+      status: 'unauthorized',
+      errorCode: 'OPENAI_UNAUTHORIZED',
+      reason,
+      timestamp: now
+    })
+    logger.info(
+      `📢 Webhook notification sent for OpenAI account ${account.name} unauthorized state`
+    )
+  } catch (webhookError) {
+    logger.error('Failed to send unauthorized webhook notification:', webhookError)
+  }
+}
+
 // 🔄 重置账户所有异常状态
 async function resetAccountStatus(accountId) {
   const account = await getAccount(accountId)
@@ -940,34 +1163,39 @@ async function getAccountRateLimitInfo(accountId) {
     return null
   }
 
-  if (account.rateLimitStatus === 'limited') {
+  const status = account.rateLimitStatus || 'normal'
+  const rateLimitedAt = account.rateLimitedAt || null
+  const rateLimitResetAt = account.rateLimitResetAt || null
+
+  if (status === 'limited') {
     const now = Date.now()
     let remainingTime = 0
 
-    // 优先使用 rateLimitResetAt 字段（精确的重置时间）
-    if (account.rateLimitResetAt) {
-      const resetAt = new Date(account.rateLimitResetAt).getTime()
+    if (rateLimitResetAt) {
+      const resetAt = new Date(rateLimitResetAt).getTime()
       remainingTime = Math.max(0, resetAt - now)
-    }
-    // 回退到使用 rateLimitedAt + 默认1小时
-    else if (account.rateLimitedAt) {
-      const limitedAt = new Date(account.rateLimitedAt).getTime()
+    } else if (rateLimitedAt) {
+      const limitedAt = new Date(rateLimitedAt).getTime()
       const limitDuration = 60 * 60 * 1000 // 默认1小时
       remainingTime = Math.max(0, limitedAt + limitDuration - now)
     }
 
+    const minutesRemaining = remainingTime > 0 ? Math.ceil(remainingTime / (60 * 1000)) : 0
+
     return {
-      isRateLimited: remainingTime > 0,
-      rateLimitedAt: account.rateLimitedAt,
-      rateLimitResetAt: account.rateLimitResetAt,
-      minutesRemaining: Math.ceil(remainingTime / (60 * 1000))
+      status,
+      isRateLimited: minutesRemaining > 0,
+      rateLimitedAt,
+      rateLimitResetAt,
+      minutesRemaining
     }
   }
 
   return {
+    status,
     isRateLimited: false,
-    rateLimitedAt: null,
-    rateLimitResetAt: null,
+    rateLimitedAt,
+    rateLimitResetAt,
     minutesRemaining: 0
   }
 }
@@ -995,9 +1223,45 @@ async function updateAccountUsage(accountId, tokens = 0) {
 // 为了兼容性，保留recordUsage作为updateAccountUsage的别名
 const recordUsage = updateAccountUsage
 
+async function updateCodexUsageSnapshot(accountId, usageSnapshot) {
+  if (!usageSnapshot || typeof usageSnapshot !== 'object') {
+    return
+  }
+
+  const fieldMap = {
+    primaryUsedPercent: 'codexPrimaryUsedPercent',
+    primaryResetAfterSeconds: 'codexPrimaryResetAfterSeconds',
+    primaryWindowMinutes: 'codexPrimaryWindowMinutes',
+    secondaryUsedPercent: 'codexSecondaryUsedPercent',
+    secondaryResetAfterSeconds: 'codexSecondaryResetAfterSeconds',
+    secondaryWindowMinutes: 'codexSecondaryWindowMinutes',
+    primaryOverSecondaryPercent: 'codexPrimaryOverSecondaryLimitPercent'
+  }
+
+  const updates = {}
+  let hasPayload = false
+
+  for (const [key, field] of Object.entries(fieldMap)) {
+    if (usageSnapshot[key] !== undefined && usageSnapshot[key] !== null) {
+      updates[field] = String(usageSnapshot[key])
+      hasPayload = true
+    }
+  }
+
+  if (!hasPayload) {
+    return
+  }
+
+  updates.codexUsageUpdatedAt = new Date().toISOString()
+
+  const client = redisClient.getClientSafe()
+  await client.hset(`${OPENAI_ACCOUNT_KEY_PREFIX}${accountId}`, updates)
+}
+
 module.exports = {
   createAccount,
   getAccount,
+  getAccountOverview,
   updateAccount,
   deleteAccount,
   getAllAccounts,
@@ -1005,11 +1269,13 @@ module.exports = {
   refreshAccountToken,
   isTokenExpired,
   setAccountRateLimited,
+  markAccountUnauthorized,
   resetAccountStatus,
   toggleSchedulable,
   getAccountRateLimitInfo,
   updateAccountUsage,
   recordUsage, // 别名，指向updateAccountUsage
+  updateCodexUsageSnapshot,
   encrypt,
   decrypt,
   generateEncryptionKey,

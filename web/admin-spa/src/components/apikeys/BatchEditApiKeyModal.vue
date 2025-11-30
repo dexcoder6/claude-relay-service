@@ -218,6 +218,20 @@
             />
           </div>
 
+          <div>
+            <label class="mb-3 block text-sm font-semibold text-gray-700 dark:text-gray-300">
+              总费用限制 (美元)
+            </label>
+            <input
+              v-model="form.totalCostLimit"
+              class="form-input w-full border-gray-300 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-200"
+              min="0"
+              placeholder="不修改 (0 表示无限制)"
+              step="0.01"
+              type="number"
+            />
+          </div>
+
           <!-- Opus 模型周费用限制 -->
           <div>
             <label class="mb-3 block text-sm font-semibold text-gray-700 dark:text-gray-300">
@@ -297,6 +311,10 @@
                 <input v-model="form.permissions" class="mr-2" type="radio" value="openai" />
                 <span class="text-sm text-gray-700">仅 OpenAI</span>
               </label>
+              <label class="flex cursor-pointer items-center">
+                <input v-model="form.permissions" class="mr-2" type="radio" value="droid" />
+                <span class="text-sm text-gray-700">仅 Droid</span>
+              </label>
             </div>
           </div>
 
@@ -328,120 +346,76 @@
                 <label class="mb-1 block text-sm font-medium text-gray-600 dark:text-gray-400"
                   >Claude 专属账号</label
                 >
-                <select
-                  v-model="form.claudeAccountId"
-                  class="form-input w-full border-gray-300 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-200"
-                  :disabled="form.permissions === 'gemini' || form.permissions === 'openai'"
-                >
-                  <option value="">不修改</option>
-                  <option value="SHARED_POOL">使用共享账号池</option>
-                  <optgroup v-if="localAccounts.claudeGroups.length > 0" label="账号分组">
-                    <option
-                      v-for="group in localAccounts.claudeGroups"
-                      :key="group.id"
-                      :value="`group:${group.id}`"
-                    >
-                      分组 - {{ group.name }}
-                    </option>
-                  </optgroup>
-                  <optgroup v-if="localAccounts.claude.length > 0" label="专属账号">
-                    <option
-                      v-for="account in localAccounts.claude"
-                      :key="account.id"
-                      :value="
-                        account.platform === 'claude-console' ? `console:${account.id}` : account.id
-                      "
-                    >
-                      {{ account.name }} ({{
-                        account.platform === 'claude-console' ? 'Console' : 'OAuth'
-                      }})
-                    </option>
-                  </optgroup>
-                </select>
+                <AccountSelector
+                  v-model="claudeAccountSelectorValue"
+                  :accounts="localAccounts.claude"
+                  default-option-text="请选择Claude账号"
+                  :disabled="!isServiceSelectable('claude')"
+                  :groups="localAccounts.claudeGroups"
+                  placeholder="请选择Claude账号"
+                  platform="claude"
+                  :special-options="accountSpecialOptions"
+                />
               </div>
               <div>
                 <label class="mb-1 block text-sm font-medium text-gray-600 dark:text-gray-400"
                   >Gemini 专属账号</label
                 >
-                <select
-                  v-model="form.geminiAccountId"
-                  class="form-input w-full border-gray-300 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-200"
-                  :disabled="form.permissions === 'claude' || form.permissions === 'openai'"
-                >
-                  <option value="">不修改</option>
-                  <option value="SHARED_POOL">使用共享账号池</option>
-                  <optgroup v-if="localAccounts.geminiGroups.length > 0" label="账号分组">
-                    <option
-                      v-for="group in localAccounts.geminiGroups"
-                      :key="group.id"
-                      :value="`group:${group.id}`"
-                    >
-                      分组 - {{ group.name }}
-                    </option>
-                  </optgroup>
-                  <optgroup v-if="localAccounts.gemini.length > 0" label="专属账号">
-                    <option
-                      v-for="account in localAccounts.gemini"
-                      :key="account.id"
-                      :value="account.id"
-                    >
-                      {{ account.name }}
-                    </option>
-                  </optgroup>
-                </select>
+                <AccountSelector
+                  v-model="geminiAccountSelectorValue"
+                  :accounts="localAccounts.gemini"
+                  default-option-text="请选择Gemini账号"
+                  :disabled="!isServiceSelectable('gemini')"
+                  :groups="localAccounts.geminiGroups"
+                  placeholder="请选择Gemini账号"
+                  platform="gemini"
+                  :special-options="accountSpecialOptions"
+                />
               </div>
               <div>
                 <label class="mb-1 block text-sm font-medium text-gray-600 dark:text-gray-400"
                   >OpenAI 专属账号</label
                 >
-                <select
-                  v-model="form.openaiAccountId"
-                  class="form-input w-full border-gray-300 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-200"
-                  :disabled="form.permissions === 'claude' || form.permissions === 'gemini'"
-                >
-                  <option value="">不修改</option>
-                  <option value="SHARED_POOL">使用共享账号池</option>
-                  <optgroup v-if="localAccounts.openaiGroups.length > 0" label="账号分组">
-                    <option
-                      v-for="group in localAccounts.openaiGroups"
-                      :key="group.id"
-                      :value="`group:${group.id}`"
-                    >
-                      分组 - {{ group.name }}
-                    </option>
-                  </optgroup>
-                  <optgroup v-if="localAccounts.openai.length > 0" label="专属账号">
-                    <option
-                      v-for="account in localAccounts.openai"
-                      :key="account.id"
-                      :value="account.id"
-                    >
-                      {{ account.name }}
-                    </option>
-                  </optgroup>
-                </select>
+                <AccountSelector
+                  v-model="openaiAccountSelectorValue"
+                  :accounts="localAccounts.openai"
+                  default-option-text="请选择OpenAI账号"
+                  :disabled="!isServiceSelectable('openai')"
+                  :groups="localAccounts.openaiGroups"
+                  placeholder="请选择OpenAI账号"
+                  platform="openai"
+                  :special-options="accountSpecialOptions"
+                />
               </div>
               <div>
                 <label class="mb-1 block text-sm font-medium text-gray-600 dark:text-gray-400"
                   >Bedrock 专属账号</label
                 >
-                <select
-                  v-model="form.bedrockAccountId"
-                  class="form-input w-full border-gray-300 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-200"
-                  :disabled="form.permissions === 'gemini' || form.permissions === 'openai'"
+                <AccountSelector
+                  v-model="bedrockAccountSelectorValue"
+                  :accounts="localAccounts.bedrock"
+                  default-option-text="请选择Bedrock账号"
+                  :disabled="!isServiceSelectable('openai')"
+                  :groups="[]"
+                  placeholder="请选择Bedrock账号"
+                  platform="bedrock"
+                  :special-options="accountSpecialOptions"
+                />
+              </div>
+              <div>
+                <label class="mb-1 block text-sm font-medium text-gray-600 dark:text-gray-400"
+                  >Droid 专属账号</label
                 >
-                  <option value="">不修改</option>
-                  <option value="SHARED_POOL">使用共享账号池</option>
-                  <optgroup v-if="localAccounts.bedrock.length > 0" label="专属账号">
-                    <option
-                      v-for="account in localAccounts.bedrock"
-                      :key="account.id"
-                      :value="account.id"
-                    >
-                      {{ account.name }}
-                    </option>
-                  </optgroup>
-                </select>
+                <AccountSelector
+                  v-model="droidAccountSelectorValue"
+                  :accounts="localAccounts.droid"
+                  default-option-text="请选择Droid账号"
+                  :disabled="!isServiceSelectable('droid')"
+                  :groups="localAccounts.droidGroups"
+                  placeholder="请选择Droid账号"
+                  platform="droid"
+                  :special-options="accountSpecialOptions"
+                />
               </div>
             </div>
           </div>
@@ -475,6 +449,7 @@ import { ref, reactive, computed, onMounted } from 'vue'
 import { showToast } from '@/utils/toast'
 import { useApiKeysStore } from '@/stores/apiKeys'
 import { apiClient } from '@/config/api'
+import AccountSelector from '@/components/common/AccountSelector.vue'
 
 const props = defineProps({
   selectedKeys: {
@@ -483,7 +458,18 @@ const props = defineProps({
   },
   accounts: {
     type: Object,
-    default: () => ({ claude: [], gemini: [], openai: [], bedrock: [] })
+    default: () => ({
+      claude: [],
+      gemini: [],
+      openai: [],
+      openaiResponses: [],
+      bedrock: [],
+      droid: [],
+      claudeGroups: [],
+      geminiGroups: [],
+      openaiGroups: [],
+      droidGroups: []
+    })
   }
 })
 
@@ -497,9 +483,11 @@ const localAccounts = ref({
   gemini: [],
   openai: [],
   bedrock: [],
+  droid: [],
   claudeGroups: [],
   geminiGroups: [],
-  openaiGroups: []
+  openaiGroups: [],
+  droidGroups: []
 })
 
 // 标签相关
@@ -521,15 +509,48 @@ const form = reactive({
   rateLimitRequests: '',
   concurrencyLimit: '',
   dailyCostLimit: '',
+  totalCostLimit: '',
   weeklyOpusCostLimit: '', // 新增Opus周费用限制
   permissions: '', // 空字符串表示不修改
   claudeAccountId: '',
   geminiAccountId: '',
   openaiAccountId: '',
   bedrockAccountId: '',
+  droidAccountId: '',
   tags: [],
   isActive: null // null表示不修改
 })
+
+const UNCHANGED_OPTION_VALUE = '__KEEP_ORIGINAL__'
+
+const accountSpecialOptions = [
+  { value: UNCHANGED_OPTION_VALUE, label: '不修改' },
+  { value: 'SHARED_POOL', label: '使用共享账号池' }
+]
+
+const createAccountSelectorModel = (field) =>
+  computed({
+    get: () => (form[field] === '' ? UNCHANGED_OPTION_VALUE : form[field]),
+    set: (value) => {
+      if (!value || value === UNCHANGED_OPTION_VALUE) {
+        form[field] = ''
+      } else {
+        form[field] = value
+      }
+    }
+  })
+
+const claudeAccountSelectorValue = createAccountSelectorModel('claudeAccountId')
+const geminiAccountSelectorValue = createAccountSelectorModel('geminiAccountId')
+const openaiAccountSelectorValue = createAccountSelectorModel('openaiAccountId')
+const bedrockAccountSelectorValue = createAccountSelectorModel('bedrockAccountId')
+const droidAccountSelectorValue = createAccountSelectorModel('droidAccountId')
+
+const isServiceSelectable = (service) => {
+  if (!form.permissions) return true
+  if (form.permissions === 'all') return true
+  return form.permissions === service
+}
 
 // 标签管理方法
 const addTag = () => {
@@ -556,15 +577,27 @@ const removeTag = (index) => {
 const refreshAccounts = async () => {
   accountsLoading.value = true
   try {
-    const [claudeData, claudeConsoleData, geminiData, openaiData, bedrockData, groupsData] =
-      await Promise.all([
-        apiClient.get('/admin/claude-accounts'),
-        apiClient.get('/admin/claude-console-accounts'),
-        apiClient.get('/admin/gemini-accounts'),
-        apiClient.get('/admin/openai-accounts'),
-        apiClient.get('/admin/bedrock-accounts'),
-        apiClient.get('/admin/account-groups')
-      ])
+    const [
+      claudeData,
+      claudeConsoleData,
+      geminiData,
+      geminiApiData,
+      openaiData,
+      openaiResponsesData,
+      bedrockData,
+      droidData,
+      groupsData
+    ] = await Promise.all([
+      apiClient.get('/admin/claude-accounts'),
+      apiClient.get('/admin/claude-console-accounts'),
+      apiClient.get('/admin/gemini-accounts'),
+      apiClient.get('/admin/gemini-api-accounts'), // 获取 Gemini-API 账号
+      apiClient.get('/admin/openai-accounts'),
+      apiClient.get('/admin/openai-responses-accounts'),
+      apiClient.get('/admin/bedrock-accounts'),
+      apiClient.get('/admin/droid-accounts'),
+      apiClient.get('/admin/account-groups')
+    ])
 
     // 合并Claude OAuth账户和Claude Console账户
     const claudeAccounts = []
@@ -591,23 +624,66 @@ const refreshAccounts = async () => {
 
     localAccounts.value.claude = claudeAccounts
 
+    // 合并 Gemini OAuth 和 Gemini API 账号
+    const geminiAccounts = []
+
     if (geminiData.success) {
-      localAccounts.value.gemini = (geminiData.data || []).map((account) => ({
-        ...account,
-        isDedicated: account.accountType === 'dedicated'
-      }))
+      ;(geminiData.data || []).forEach((account) => {
+        geminiAccounts.push({
+          ...account,
+          platform: 'gemini',
+          isDedicated: account.accountType === 'dedicated'
+        })
+      })
     }
 
-    if (openaiData.success) {
-      localAccounts.value.openai = (openaiData.data || []).map((account) => ({
-        ...account,
-        isDedicated: account.accountType === 'dedicated'
-      }))
+    if (geminiApiData.success) {
+      ;(geminiApiData.data || []).forEach((account) => {
+        geminiAccounts.push({
+          ...account,
+          platform: 'gemini-api',
+          isDedicated: account.accountType === 'dedicated'
+        })
+      })
     }
+
+    localAccounts.value.gemini = geminiAccounts
+
+    const openaiAccounts = []
+
+    if (openaiData.success) {
+      ;(openaiData.data || []).forEach((account) => {
+        openaiAccounts.push({
+          ...account,
+          platform: 'openai',
+          isDedicated: account.accountType === 'dedicated'
+        })
+      })
+    }
+
+    if (openaiResponsesData.success) {
+      ;(openaiResponsesData.data || []).forEach((account) => {
+        openaiAccounts.push({
+          ...account,
+          platform: 'openai-responses',
+          isDedicated: account.accountType === 'dedicated'
+        })
+      })
+    }
+
+    localAccounts.value.openai = openaiAccounts
 
     if (bedrockData.success) {
       localAccounts.value.bedrock = (bedrockData.data || []).map((account) => ({
         ...account,
+        isDedicated: account.accountType === 'dedicated'
+      }))
+    }
+
+    if (droidData.success) {
+      localAccounts.value.droid = (droidData.data || []).map((account) => ({
+        ...account,
+        platform: 'droid',
         isDedicated: account.accountType === 'dedicated'
       }))
     }
@@ -618,6 +694,7 @@ const refreshAccounts = async () => {
       localAccounts.value.claudeGroups = allGroups.filter((g) => g.platform === 'claude')
       localAccounts.value.geminiGroups = allGroups.filter((g) => g.platform === 'gemini')
       localAccounts.value.openaiGroups = allGroups.filter((g) => g.platform === 'openai')
+      localAccounts.value.droidGroups = allGroups.filter((g) => g.platform === 'droid')
     }
 
     showToast('账号列表已刷新', 'success')
@@ -651,6 +728,9 @@ const batchUpdateApiKeys = async () => {
     }
     if (form.dailyCostLimit !== '' && form.dailyCostLimit !== null) {
       updates.dailyCostLimit = parseFloat(form.dailyCostLimit)
+    }
+    if (form.totalCostLimit !== '' && form.totalCostLimit !== null) {
+      updates.totalCostLimit = parseFloat(form.totalCostLimit)
     }
     if (form.weeklyOpusCostLimit !== '' && form.weeklyOpusCostLimit !== null) {
       updates.weeklyOpusCostLimit = parseFloat(form.weeklyOpusCostLimit)
@@ -699,6 +779,14 @@ const batchUpdateApiKeys = async () => {
         updates.bedrockAccountId = null
       } else {
         updates.bedrockAccountId = form.bedrockAccountId
+      }
+    }
+
+    if (form.droidAccountId !== '') {
+      if (form.droidAccountId === 'SHARED_POOL') {
+        updates.droidAccountId = null
+      } else {
+        updates.droidAccountId = form.droidAccountId
       }
     }
 
@@ -751,14 +839,45 @@ onMounted(async () => {
 
   // 初始化账号数据
   if (props.accounts) {
+    // props.accounts.gemini 已经包含了 OAuth 和 API 两种类型的账号（父组件已合并）
+    // 保留原有的 platform 属性，不要覆盖
+    const geminiAccounts = (props.accounts.gemini || []).map((account) => ({
+      ...account,
+      platform: account.platform || 'gemini' // 保留原有 platform，只在没有时设默认值
+    }))
+
+    // props.accounts.openai 只包含 openai 类型，openaiResponses 需要单独处理
+    const openaiAccounts = []
+    if (props.accounts.openai) {
+      props.accounts.openai.forEach((account) => {
+        openaiAccounts.push({
+          ...account,
+          platform: account.platform || 'openai'
+        })
+      })
+    }
+    if (props.accounts.openaiResponses) {
+      props.accounts.openaiResponses.forEach((account) => {
+        openaiAccounts.push({
+          ...account,
+          platform: account.platform || 'openai-responses'
+        })
+      })
+    }
+
     localAccounts.value = {
       claude: props.accounts.claude || [],
-      gemini: props.accounts.gemini || [],
-      openai: props.accounts.openai || [],
+      gemini: geminiAccounts,
+      openai: openaiAccounts,
       bedrock: props.accounts.bedrock || [],
+      droid: (props.accounts.droid || []).map((account) => ({
+        ...account,
+        platform: account.platform || 'droid'
+      })),
       claudeGroups: props.accounts.claudeGroups || [],
       geminiGroups: props.accounts.geminiGroups || [],
-      openaiGroups: props.accounts.openaiGroups || []
+      openaiGroups: props.accounts.openaiGroups || [],
+      droidGroups: props.accounts.droidGroups || []
     }
   }
 })

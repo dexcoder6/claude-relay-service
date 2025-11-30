@@ -1,9 +1,130 @@
+const { v4: uuidv4 } = require('uuid')
+const config = require('../../config/config')
 const apiKeyService = require('../services/apiKeyService')
 const userService = require('../services/userService')
 const logger = require('../utils/logger')
 const redis = require('../models/redis')
 // const { RateLimiterRedis } = require('rate-limiter-flexible') // 暂时未使用
-const config = require('../../config/config')
+const ClientValidator = require('../validators/clientValidator')
+
+const FALLBACK_CONCURRENCY_CONFIG = {
+  leaseSeconds: 300,
+  renewIntervalSeconds: 30,
+  cleanupGraceSeconds: 30
+}
+
+const resolveConcurrencyConfig = () => {
+  if (typeof redis._getConcurrencyConfig === 'function') {
+    return redis._getConcurrencyConfig()
+  }
+
+  const raw = {
+    ...FALLBACK_CONCURRENCY_CONFIG,
+    ...(config.concurrency || {})
+  }
+
+  const toNumber = (value, fallback) => {
+    const parsed = Number(value)
+    if (!Number.isFinite(parsed)) {
+      return fallback
+    }
+    return parsed
+  }
+
+  const leaseSeconds = Math.max(
+    toNumber(raw.leaseSeconds, FALLBACK_CONCURRENCY_CONFIG.leaseSeconds),
+    30
+  )
+
+  let renewIntervalSeconds
+  if (raw.renewIntervalSeconds === 0 || raw.renewIntervalSeconds === '0') {
+    renewIntervalSeconds = 0
+  } else {
+    renewIntervalSeconds = Math.max(
+      toNumber(raw.renewIntervalSeconds, FALLBACK_CONCURRENCY_CONFIG.renewIntervalSeconds),
+      0
+    )
+  }
+
+  const cleanupGraceSeconds = Math.max(
+    toNumber(raw.cleanupGraceSeconds, FALLBACK_CONCURRENCY_CONFIG.cleanupGraceSeconds),
+    0
+  )
+
+  return {
+    leaseSeconds,
+    renewIntervalSeconds,
+    cleanupGraceSeconds
+  }
+}
+
+const TOKEN_COUNT_PATHS = new Set([
+  '/v1/messages/count_tokens',
+  '/api/v1/messages/count_tokens',
+  '/claude/v1/messages/count_tokens'
+])
+
+function extractApiKey(req) {
+  const candidates = [
+    req.headers['x-api-key'],
+    req.headers['x-goog-api-key'],
+    req.headers['authorization'],
+    req.headers['api-key'],
+    req.query?.key
+  ]
+
+  for (const candidate of candidates) {
+    let value = candidate
+
+    if (Array.isArray(value)) {
+      value = value.find((item) => typeof item === 'string' && item.trim())
+    }
+
+    if (typeof value !== 'string') {
+      continue
+    }
+
+    let trimmed = value.trim()
+    if (!trimmed) {
+      continue
+    }
+
+    if (/^Bearer\s+/i.test(trimmed)) {
+      trimmed = trimmed.replace(/^Bearer\s+/i, '').trim()
+      if (!trimmed) {
+        continue
+      }
+    }
+
+    return trimmed
+  }
+
+  return ''
+}
+
+function normalizeRequestPath(value) {
+  if (!value) {
+    return '/'
+  }
+  const lower = value.split('?')[0].toLowerCase()
+  const collapsed = lower.replace(/\/{2,}/g, '/')
+  if (collapsed.length > 1 && collapsed.endsWith('/')) {
+    return collapsed.slice(0, -1)
+  }
+  return collapsed || '/'
+}
+
+function isTokenCountRequest(req) {
+  const combined = normalizeRequestPath(`${req.baseUrl || ''}${req.path || ''}`)
+  if (TOKEN_COUNT_PATHS.has(combined)) {
+    return true
+  }
+  const original = normalizeRequestPath(req.originalUrl || '')
+  if (TOKEN_COUNT_PATHS.has(original)) {
+    return true
+  }
+  return false
+}
 
 // 🔑 API Key验证中间件（优化版）
 const authenticateApiKey = async (req, res, next) => {
@@ -11,18 +132,18 @@ const authenticateApiKey = async (req, res, next) => {
 
   try {
     // 安全提取API Key，支持多种格式（包括Gemini CLI支持）
-    const apiKey =
-      req.headers['x-api-key'] ||
-      req.headers['x-goog-api-key'] ||
-      req.headers['authorization']?.replace(/^Bearer\s+/i, '') ||
-      req.headers['api-key'] ||
-      req.query.key
+    const apiKey = extractApiKey(req)
+
+    if (apiKey) {
+      req.headers['x-api-key'] = apiKey
+    }
 
     if (!apiKey) {
       logger.security(`🔒 Missing API key attempt from ${req.ip || 'unknown'}`)
       return res.status(401).json({
         error: 'Missing API key',
-        message: 'Please provide an API key in the x-api-key header or Authorization header'
+        message:
+          'Please provide an API key in the x-api-key, x-goog-api-key, or Authorization header'
       })
     }
 
@@ -47,80 +168,70 @@ const authenticateApiKey = async (req, res, next) => {
       })
     }
 
-    // 🔒 检查客户端限制
+    const skipKeyRestrictions = isTokenCountRequest(req)
+
+    // 🔒 检查客户端限制（使用新的验证器）
     if (
+      !skipKeyRestrictions &&
       validation.keyData.enableClientRestriction &&
       validation.keyData.allowedClients?.length > 0
     ) {
-      const userAgent = req.headers['user-agent'] || ''
-      const clientIP = req.ip || req.connection?.remoteAddress || 'unknown'
-
-      // 记录客户端限制检查开始
-      logger.api(
-        `🔍 Checking client restriction for key: ${validation.keyData.id} (${validation.keyData.name})`
+      // 使用新的 ClientValidator 进行验证
+      const validationResult = ClientValidator.validateRequest(
+        validation.keyData.allowedClients,
+        req
       )
-      logger.api(`   User-Agent: "${userAgent}"`)
-      logger.api(`   Allowed clients: ${validation.keyData.allowedClients.join(', ')}`)
 
-      let clientAllowed = false
-      let matchedClient = null
-
-      // 获取预定义客户端列表，如果配置不存在则使用默认值
-      const predefinedClients = config.clientRestrictions?.predefinedClients || []
-      const allowCustomClients = config.clientRestrictions?.allowCustomClients || false
-
-      // 遍历允许的客户端列表
-      for (const allowedClientId of validation.keyData.allowedClients) {
-        // 在预定义客户端列表中查找
-        const predefinedClient = predefinedClients.find((client) => client.id === allowedClientId)
-
-        if (predefinedClient) {
-          // 使用预定义的正则表达式匹配 User-Agent
-          if (
-            predefinedClient.userAgentPattern &&
-            predefinedClient.userAgentPattern.test(userAgent)
-          ) {
-            clientAllowed = true
-            matchedClient = predefinedClient.name
-            break
-          }
-        } else if (allowCustomClients) {
-          // 如果允许自定义客户端，这里可以添加自定义客户端的验证逻辑
-          // 目前暂时跳过自定义客户端
-          continue
-        }
-      }
-
-      if (!clientAllowed) {
+      if (!validationResult.allowed) {
+        const clientIP = req.ip || req.connection?.remoteAddress || 'unknown'
         logger.security(
-          `🚫 Client restriction failed for key: ${validation.keyData.id} (${validation.keyData.name}) from ${clientIP}, User-Agent: ${userAgent}`
+          `🚫 Client restriction failed for key: ${validation.keyData.id} (${validation.keyData.name}) from ${clientIP}`
         )
         return res.status(403).json({
           error: 'Client not allowed',
           message: 'Your client is not authorized to use this API key',
-          allowedClients: validation.keyData.allowedClients
+          allowedClients: validation.keyData.allowedClients,
+          userAgent: validationResult.userAgent
         })
       }
 
+      // 验证通过
       logger.api(
-        `✅ Client validated: ${matchedClient} for key: ${validation.keyData.id} (${validation.keyData.name})`
+        `✅ Client validated: ${validationResult.clientName} (${validationResult.matchedClient}) for key: ${validation.keyData.id} (${validation.keyData.name})`
       )
-      logger.api(`   Matched client: ${matchedClient} with User-Agent: "${userAgent}"`)
     }
 
     // 检查并发限制
     const concurrencyLimit = validation.keyData.concurrencyLimit || 0
-    if (concurrencyLimit > 0) {
-      const currentConcurrency = await redis.incrConcurrency(validation.keyData.id)
+    if (!skipKeyRestrictions && concurrencyLimit > 0) {
+      const { leaseSeconds: configLeaseSeconds, renewIntervalSeconds: configRenewIntervalSeconds } =
+        resolveConcurrencyConfig()
+      const leaseSeconds = Math.max(Number(configLeaseSeconds) || 300, 30)
+      let renewIntervalSeconds = configRenewIntervalSeconds
+      if (renewIntervalSeconds > 0) {
+        const maxSafeRenew = Math.max(leaseSeconds - 5, 15)
+        renewIntervalSeconds = Math.min(Math.max(renewIntervalSeconds, 15), maxSafeRenew)
+      } else {
+        renewIntervalSeconds = 0
+      }
+      const requestId = uuidv4()
+
+      const currentConcurrency = await redis.incrConcurrency(
+        validation.keyData.id,
+        requestId,
+        leaseSeconds
+      )
       logger.api(
         `📈 Incremented concurrency for key: ${validation.keyData.id} (${validation.keyData.name}), current: ${currentConcurrency}, limit: ${concurrencyLimit}`
       )
 
       if (currentConcurrency > concurrencyLimit) {
         // 如果超过限制，立即减少计数
-        await redis.decrConcurrency(validation.keyData.id)
+        await redis.decrConcurrency(validation.keyData.id, requestId)
         logger.security(
-          `🚦 Concurrency limit exceeded for key: ${validation.keyData.id} (${validation.keyData.name}), current: ${currentConcurrency - 1}, limit: ${concurrencyLimit}`
+          `🚦 Concurrency limit exceeded for key: ${validation.keyData.id} (${
+            validation.keyData.name
+          }), current: ${currentConcurrency - 1}, limit: ${concurrencyLimit}`
         )
         return res.status(429).json({
           error: 'Concurrency limit exceeded',
@@ -130,14 +241,39 @@ const authenticateApiKey = async (req, res, next) => {
         })
       }
 
+      const renewIntervalMs =
+        renewIntervalSeconds > 0 ? Math.max(renewIntervalSeconds * 1000, 15000) : 0
+
       // 使用标志位确保只减少一次
       let concurrencyDecremented = false
+      let leaseRenewInterval = null
+
+      if (renewIntervalMs > 0) {
+        leaseRenewInterval = setInterval(() => {
+          redis
+            .refreshConcurrencyLease(validation.keyData.id, requestId, leaseSeconds)
+            .catch((error) => {
+              logger.error(
+                `Failed to refresh concurrency lease for key ${validation.keyData.id}:`,
+                error
+              )
+            })
+        }, renewIntervalMs)
+
+        if (typeof leaseRenewInterval.unref === 'function') {
+          leaseRenewInterval.unref()
+        }
+      }
 
       const decrementConcurrency = async () => {
         if (!concurrencyDecremented) {
           concurrencyDecremented = true
+          if (leaseRenewInterval) {
+            clearInterval(leaseRenewInterval)
+            leaseRenewInterval = null
+          }
           try {
-            const newCount = await redis.decrConcurrency(validation.keyData.id)
+            const newCount = await redis.decrConcurrency(validation.keyData.id, requestId)
             logger.api(
               `📉 Decremented concurrency for key: ${validation.keyData.id} (${validation.keyData.name}), new count: ${newCount}`
             )
@@ -164,6 +300,29 @@ const authenticateApiKey = async (req, res, next) => {
         decrementConcurrency()
       })
 
+      req.once('aborted', () => {
+        logger.warn(
+          `⚠️ Request aborted for key: ${validation.keyData.id} (${validation.keyData.name})`
+        )
+        decrementConcurrency()
+      })
+
+      req.once('error', (error) => {
+        logger.error(
+          `❌ Request error for key ${validation.keyData.id} (${validation.keyData.name}):`,
+          error
+        )
+        decrementConcurrency()
+      })
+
+      res.once('error', (error) => {
+        logger.error(
+          `❌ Response error for key ${validation.keyData.id} (${validation.keyData.name}):`,
+          error
+        )
+        decrementConcurrency()
+      })
+
       // res.on('finish') 处理正常完成的情况
       res.once('finish', () => {
         logger.api(
@@ -176,6 +335,7 @@ const authenticateApiKey = async (req, res, next) => {
       req.concurrencyInfo = {
         apiKeyId: validation.keyData.id,
         apiKeyName: validation.keyData.name,
+        requestId,
         decrementConcurrency
       }
     }
@@ -275,7 +435,9 @@ const authenticateApiKey = async (req, res, next) => {
           const remainingMinutes = Math.ceil((resetTime - now) / 60000)
 
           logger.security(
-            `💰 Rate limit exceeded (cost) for key: ${validation.keyData.id} (${validation.keyData.name}), cost: $${currentCost.toFixed(2)}/$${rateLimitCost}`
+            `💰 Rate limit exceeded (cost) for key: ${validation.keyData.id} (${
+              validation.keyData.name
+            }), cost: $${currentCost.toFixed(2)}/$${rateLimitCost}`
           )
 
           return res.status(429).json({
@@ -315,7 +477,9 @@ const authenticateApiKey = async (req, res, next) => {
 
       if (dailyCost >= dailyCostLimit) {
         logger.security(
-          `💰 Daily cost limit exceeded for key: ${validation.keyData.id} (${validation.keyData.name}), cost: $${dailyCost.toFixed(2)}/$${dailyCostLimit}`
+          `💰 Daily cost limit exceeded for key: ${validation.keyData.id} (${
+            validation.keyData.name
+          }), cost: $${dailyCost.toFixed(2)}/$${dailyCostLimit}`
         )
 
         return res.status(429).json({
@@ -329,7 +493,36 @@ const authenticateApiKey = async (req, res, next) => {
 
       // 记录当前费用使用情况
       logger.api(
-        `💰 Cost usage for key: ${validation.keyData.id} (${validation.keyData.name}), current: $${dailyCost.toFixed(2)}/$${dailyCostLimit}`
+        `💰 Cost usage for key: ${validation.keyData.id} (${
+          validation.keyData.name
+        }), current: $${dailyCost.toFixed(2)}/$${dailyCostLimit}`
+      )
+    }
+
+    // 检查总费用限制
+    const totalCostLimit = validation.keyData.totalCostLimit || 0
+    if (totalCostLimit > 0) {
+      const totalCost = validation.keyData.totalCost || 0
+
+      if (totalCost >= totalCostLimit) {
+        logger.security(
+          `💰 Total cost limit exceeded for key: ${validation.keyData.id} (${
+            validation.keyData.name
+          }), cost: $${totalCost.toFixed(2)}/$${totalCostLimit}`
+        )
+
+        return res.status(429).json({
+          error: 'Total cost limit exceeded',
+          message: `已达到总费用限制 ($${totalCostLimit})`,
+          currentCost: totalCost,
+          costLimit: totalCostLimit
+        })
+      }
+
+      logger.api(
+        `💰 Total cost usage for key: ${validation.keyData.id} (${
+          validation.keyData.name
+        }), current: $${totalCost.toFixed(2)}/$${totalCostLimit}`
       )
     }
 
@@ -346,7 +539,9 @@ const authenticateApiKey = async (req, res, next) => {
 
         if (weeklyOpusCost >= weeklyOpusCostLimit) {
           logger.security(
-            `💰 Weekly Opus cost limit exceeded for key: ${validation.keyData.id} (${validation.keyData.name}), cost: $${weeklyOpusCost.toFixed(2)}/$${weeklyOpusCostLimit}`
+            `💰 Weekly Opus cost limit exceeded for key: ${validation.keyData.id} (${
+              validation.keyData.name
+            }), cost: $${weeklyOpusCost.toFixed(2)}/$${weeklyOpusCostLimit}`
           )
 
           // 计算下周一的重置时间
@@ -368,7 +563,9 @@ const authenticateApiKey = async (req, res, next) => {
 
         // 记录当前 Opus 费用使用情况
         logger.api(
-          `💰 Opus weekly cost usage for key: ${validation.keyData.id} (${validation.keyData.name}), current: $${weeklyOpusCost.toFixed(2)}/$${weeklyOpusCostLimit}`
+          `💰 Opus weekly cost usage for key: ${validation.keyData.id} (${
+            validation.keyData.name
+          }), current: $${weeklyOpusCost.toFixed(2)}/$${weeklyOpusCostLimit}`
         )
       }
     }
@@ -383,6 +580,7 @@ const authenticateApiKey = async (req, res, next) => {
       geminiAccountId: validation.keyData.geminiAccountId,
       openaiAccountId: validation.keyData.openaiAccountId, // 添加 OpenAI 账号ID
       bedrockAccountId: validation.keyData.bedrockAccountId, // 添加 Bedrock 账号ID
+      droidAccountId: validation.keyData.droidAccountId,
       permissions: validation.keyData.permissions,
       concurrencyLimit: validation.keyData.concurrencyLimit,
       rateLimitWindow: validation.keyData.rateLimitWindow,
@@ -394,6 +592,8 @@ const authenticateApiKey = async (req, res, next) => {
       allowedClients: validation.keyData.allowedClients,
       dailyCostLimit: validation.keyData.dailyCostLimit,
       dailyCost: validation.keyData.dailyCost,
+      totalCostLimit: validation.keyData.totalCostLimit,
+      totalCost: validation.keyData.totalCost,
       usage: validation.keyData.usage
     }
     req.usage = validation.keyData.usage
@@ -787,6 +987,7 @@ const corsMiddleware = (req, res, next) => {
       'Accept',
       'Authorization',
       'x-api-key',
+      'x-goog-api-key',
       'api-key',
       'x-admin-token',
       'anthropic-version',

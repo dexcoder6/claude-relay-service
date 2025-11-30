@@ -11,6 +11,7 @@ export const useAccountsStore = defineStore('accounts', () => {
   const openaiAccounts = ref([])
   const azureOpenaiAccounts = ref([])
   const openaiResponsesAccounts = ref([])
+  const droidAccounts = ref([])
   const loading = ref(false)
   const error = ref(null)
   const sortBy = ref('')
@@ -151,6 +152,25 @@ export const useAccountsStore = defineStore('accounts', () => {
     }
   }
 
+  // 获取Droid账户列表
+  const fetchDroidAccounts = async () => {
+    loading.value = true
+    error.value = null
+    try {
+      const response = await apiClient.get('/admin/droid-accounts')
+      if (response.success) {
+        droidAccounts.value = response.data || []
+      } else {
+        throw new Error(response.message || '获取Droid账户失败')
+      }
+    } catch (err) {
+      error.value = err.message
+      throw err
+    } finally {
+      loading.value = false
+    }
+  }
+
   // 获取所有账户
   const fetchAllAccounts = async () => {
     loading.value = true
@@ -163,7 +183,8 @@ export const useAccountsStore = defineStore('accounts', () => {
         fetchGeminiAccounts(),
         fetchOpenAIAccounts(),
         fetchAzureOpenAIAccounts(),
-        fetchOpenAIResponsesAccounts()
+        fetchOpenAIResponsesAccounts(),
+        fetchDroidAccounts()
       ])
     } catch (err) {
       error.value = err.message
@@ -273,6 +294,46 @@ export const useAccountsStore = defineStore('accounts', () => {
     }
   }
 
+  // 创建Droid账户
+  const createDroidAccount = async (data) => {
+    loading.value = true
+    error.value = null
+    try {
+      const response = await apiClient.post('/admin/droid-accounts', data)
+      if (response.success) {
+        await fetchDroidAccounts()
+        return response.data
+      } else {
+        throw new Error(response.message || '创建Droid账户失败')
+      }
+    } catch (err) {
+      error.value = err.message
+      throw err
+    } finally {
+      loading.value = false
+    }
+  }
+
+  // 更新Droid账户
+  const updateDroidAccount = async (id, data) => {
+    loading.value = true
+    error.value = null
+    try {
+      const response = await apiClient.put(`/admin/droid-accounts/${id}`, data)
+      if (response.success) {
+        await fetchDroidAccounts()
+        return response.data
+      } else {
+        throw new Error(response.message || '更新Droid账户失败')
+      }
+    } catch (err) {
+      error.value = err.message
+      throw err
+    } finally {
+      loading.value = false
+    }
+  }
+
   // 创建Azure OpenAI账户
   const createAzureOpenAIAccount = async (data) => {
     loading.value = true
@@ -304,6 +365,26 @@ export const useAccountsStore = defineStore('accounts', () => {
         return response.data
       } else {
         throw new Error(response.message || '创建OpenAI-Responses账户失败')
+      }
+    } catch (err) {
+      error.value = err.message
+      throw err
+    } finally {
+      loading.value = false
+    }
+  }
+
+  // 创建Gemini API账户
+  const createGeminiApiAccount = async (data) => {
+    loading.value = true
+    error.value = null
+    try {
+      const response = await apiClient.post('/admin/gemini-api-accounts', data)
+      if (response.success) {
+        await fetchGeminiAccounts()
+        return response.data
+      } else {
+        throw new Error(response.message || '创建Gemini API账户失败')
       }
     } catch (err) {
       error.value = err.message
@@ -444,6 +525,26 @@ export const useAccountsStore = defineStore('accounts', () => {
         return response
       } else {
         throw new Error(response.message || '更新OpenAI-Responses账户失败')
+      }
+    } catch (err) {
+      error.value = err.message
+      throw err
+    } finally {
+      loading.value = false
+    }
+  }
+
+  // 更新Gemini API账户
+  const updateGeminiApiAccount = async (id, data) => {
+    loading.value = true
+    error.value = null
+    try {
+      const response = await apiClient.put(`/admin/gemini-api-accounts/${id}`, data)
+      if (response.success) {
+        await fetchGeminiAccounts()
+        return response
+      } else {
+        throw new Error(response.message || '更新Gemini API账户失败')
       }
     } catch (err) {
       error.value = err.message
@@ -694,6 +795,22 @@ export const useAccountsStore = defineStore('accounts', () => {
     }
   }
 
+  // 生成Droid OAuth URL
+  const generateDroidAuthUrl = async (proxyConfig) => {
+    error.value = null
+    try {
+      const response = await apiClient.post('/admin/droid-accounts/generate-auth-url', proxyConfig)
+      if (response.success) {
+        return response.data
+      } else {
+        throw new Error(response.message || '生成授权URL失败')
+      }
+    } catch (err) {
+      error.value = err.message
+      throw err
+    }
+  }
+
   // 交换OpenAI OAuth Code
   const exchangeOpenAICode = async (data) => {
     try {
@@ -703,6 +820,18 @@ export const useAccountsStore = defineStore('accounts', () => {
       } else {
         throw new Error(response.message || '交换授权码失败')
       }
+    } catch (err) {
+      error.value = err.message
+      throw err
+    }
+  }
+
+  // 交换Droid OAuth Code
+  const exchangeDroidCode = async (data) => {
+    error.value = null
+    try {
+      const response = await apiClient.post('/admin/droid-accounts/exchange-code', data)
+      return response
     } catch (err) {
       error.value = err.message
       throw err
@@ -728,6 +857,7 @@ export const useAccountsStore = defineStore('accounts', () => {
     openaiAccounts.value = []
     azureOpenaiAccounts.value = []
     openaiResponsesAccounts.value = []
+    droidAccounts.value = []
     loading.value = false
     error.value = null
     sortBy.value = ''
@@ -743,6 +873,7 @@ export const useAccountsStore = defineStore('accounts', () => {
     openaiAccounts,
     azureOpenaiAccounts,
     openaiResponsesAccounts,
+    droidAccounts,
     loading,
     error,
     sortBy,
@@ -756,14 +887,18 @@ export const useAccountsStore = defineStore('accounts', () => {
     fetchOpenAIAccounts,
     fetchAzureOpenAIAccounts,
     fetchOpenAIResponsesAccounts,
+    fetchDroidAccounts,
     fetchAllAccounts,
     createClaudeAccount,
     createClaudeConsoleAccount,
     createBedrockAccount,
     createGeminiAccount,
     createOpenAIAccount,
+    createDroidAccount,
+    updateDroidAccount,
     createAzureOpenAIAccount,
     createOpenAIResponsesAccount,
+    createGeminiApiAccount,
     updateClaudeAccount,
     updateClaudeConsoleAccount,
     updateBedrockAccount,
@@ -771,6 +906,7 @@ export const useAccountsStore = defineStore('accounts', () => {
     updateOpenAIAccount,
     updateAzureOpenAIAccount,
     updateOpenAIResponsesAccount,
+    updateGeminiApiAccount,
     toggleAccount,
     deleteAccount,
     refreshClaudeToken,
@@ -782,6 +918,8 @@ export const useAccountsStore = defineStore('accounts', () => {
     exchangeGeminiCode,
     generateOpenAIAuthUrl,
     exchangeOpenAICode,
+    generateDroidAuthUrl,
+    exchangeDroidCode,
     sortAccounts,
     reset
   }

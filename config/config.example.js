@@ -73,6 +73,30 @@ const config = {
   proxy: {
     timeout: parseInt(process.env.DEFAULT_PROXY_TIMEOUT) || 600000, // 10分钟
     maxRetries: parseInt(process.env.MAX_PROXY_RETRIES) || 3,
+    // 连接池与 Keep-Alive 配置（默认关闭，需要显式开启）
+    keepAlive: (() => {
+      if (process.env.PROXY_KEEP_ALIVE === undefined || process.env.PROXY_KEEP_ALIVE === '') {
+        return false
+      }
+      return process.env.PROXY_KEEP_ALIVE === 'true'
+    })(),
+    maxSockets: (() => {
+      if (process.env.PROXY_MAX_SOCKETS === undefined || process.env.PROXY_MAX_SOCKETS === '') {
+        return undefined
+      }
+      const parsed = parseInt(process.env.PROXY_MAX_SOCKETS)
+      return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined
+    })(),
+    maxFreeSockets: (() => {
+      if (
+        process.env.PROXY_MAX_FREE_SOCKETS === undefined ||
+        process.env.PROXY_MAX_FREE_SOCKETS === ''
+      ) {
+        return undefined
+      }
+      const parsed = parseInt(process.env.PROXY_MAX_FREE_SOCKETS)
+      return Number.isFinite(parsed) && parsed >= 0 ? parsed : undefined
+    })(),
     // IP协议族配置：true=IPv4, false=IPv6, 默认IPv4（兼容性更好）
     useIPv4: process.env.PROXY_USE_IPV4 !== 'false' // 默认 true，只有明确设置为 'false' 才使用 IPv6
   },
@@ -111,38 +135,6 @@ const config = {
     logoUrl: process.env.WEB_LOGO_URL || '/assets/logo.png',
     enableCors: process.env.ENABLE_CORS === 'true',
     sessionSecret: process.env.WEB_SESSION_SECRET || 'CHANGE-THIS-SESSION-SECRET'
-  },
-
-  // 🔒 客户端限制配置
-  clientRestrictions: {
-    // 预定义的客户端列表
-    predefinedClients: [
-      {
-        id: 'claude_code',
-        name: 'ClaudeCode',
-        description: 'Official Claude Code CLI',
-        // 匹配 Claude CLI 的 User-Agent
-        // 示例: claude-cli/1.0.58 (external, cli)
-        userAgentPattern: /^claude-cli\/[\d.]+\s+\(/i
-      },
-      {
-        id: 'gemini_cli',
-        name: 'Gemini-CLI',
-        description: 'Gemini Command Line Interface',
-        // 匹配 GeminiCLI 的 User-Agent
-        // 示例: GeminiCLI/v18.20.8 (darwin; arm64)
-        userAgentPattern: /^GeminiCLI\/v?[\d.]+\s+\(/i
-      }
-      // 添加自定义客户端示例：
-      // {
-      //   id: 'custom_client',
-      //   name: 'My Custom Client',
-      //   description: 'My custom API client',
-      //   userAgentPattern: /^MyClient\/[\d\.]+/i
-      // }
-    ],
-    // 是否允许自定义客户端（未来功能）
-    allowCustomClients: process.env.ALLOW_CUSTOM_CLIENTS === 'true'
   },
 
   // 🔐 LDAP 认证配置

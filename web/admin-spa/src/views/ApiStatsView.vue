@@ -101,7 +101,7 @@
                   >统计时间范围</span
                 >
               </div>
-              <div class="flex w-full gap-2 md:w-auto">
+              <div class="flex w-full items-center gap-2 md:w-auto">
                 <button
                   class="flex flex-1 items-center justify-center gap-1 px-4 py-2 text-xs font-medium md:flex-none md:gap-2 md:px-6 md:text-sm"
                   :class="['period-btn', { active: statsPeriod === 'daily' }]"
@@ -120,6 +120,16 @@
                   <i class="fas fa-calendar-alt text-xs md:text-sm" />
                   本月
                 </button>
+                <!-- 测试按钮 - 仅在单Key模式下显示 -->
+                <button
+                  v-if="!multiKeyMode"
+                  class="test-btn flex items-center justify-center gap-1 px-4 py-2 text-xs font-medium md:gap-2 md:px-6 md:text-sm"
+                  :disabled="loading"
+                  @click="openTestModal"
+                >
+                  <i class="fas fa-vial text-xs md:text-sm" />
+                  测试
+                </button>
               </div>
             </div>
           </div>
@@ -128,12 +138,16 @@
           <StatsOverview />
 
           <!-- Token 分布和限制配置 -->
-          <div class="mb-6 grid grid-cols-1 gap-4 md:mb-8 md:gap-6 lg:grid-cols-2">
-            <TokenDistribution />
-            <!-- 单key模式下显示限制配置 -->
-            <LimitConfig v-if="!multiKeyMode" />
-            <!-- 多key模式下显示聚合统计卡片，填充右侧空白 -->
-            <AggregatedStatsCard v-if="multiKeyMode" />
+          <div
+            class="mb-6 mt-6 grid grid-cols-1 gap-4 md:mb-8 md:mt-8 md:gap-6 xl:grid-cols-2 xl:items-stretch"
+          >
+            <TokenDistribution class="h-full" />
+            <template v-if="multiKeyMode">
+              <AggregatedStatsCard class="h-full" />
+            </template>
+            <template v-else>
+              <LimitConfig class="h-full" />
+            </template>
           </div>
 
           <!-- 模型使用统计 -->
@@ -148,6 +162,14 @@
         <TutorialView />
       </div>
     </div>
+
+    <!-- API Key 测试弹窗 -->
+    <ApiKeyTestModal
+      :api-key-name="statsData?.name || ''"
+      :api-key-value="apiKey"
+      :show="showTestModal"
+      @close="closeTestModal"
+    />
   </div>
 </template>
 
@@ -167,6 +189,7 @@ import LimitConfig from '@/components/apistats/LimitConfig.vue'
 import AggregatedStatsCard from '@/components/apistats/AggregatedStatsCard.vue'
 import ModelUsageStats from '@/components/apistats/ModelUsageStats.vue'
 import TutorialView from './TutorialView.vue'
+import ApiKeyTestModal from '@/components/apikeys/ApiKeyTestModal.vue'
 
 const route = useRoute()
 const apiStatsStore = useApiStatsStore()
@@ -193,6 +216,19 @@ const {
 
 const { queryStats, switchPeriod, loadStatsWithApiId, loadOemSettings, reset } = apiStatsStore
 
+// 测试弹窗状态
+const showTestModal = ref(false)
+
+// 打开测试弹窗
+const openTestModal = () => {
+  showTestModal.value = true
+}
+
+// 关闭测试弹窗
+const closeTestModal = () => {
+  showTestModal.value = false
+}
+
 // 处理键盘快捷键
 const handleKeyDown = (event) => {
   // Ctrl/Cmd + Enter 查询
@@ -211,7 +247,7 @@ const handleKeyDown = (event) => {
 
 // 初始化
 onMounted(() => {
-  console.log('API Stats Page loaded')
+  // API Stats Page loaded
 
   // 初始化主题（因为该页面不在 MainLayout 内）
   themeStore.initTheme()
@@ -513,6 +549,36 @@ watch(apiKey, (newValue) => {
   background: rgba(75, 85, 99, 0.6);
   color: #ffffff;
   border-color: rgba(107, 114, 128, 0.8);
+}
+
+/* 测试按钮样式 */
+.test-btn {
+  position: relative;
+  overflow: hidden;
+  border-radius: 12px;
+  font-weight: 500;
+  letter-spacing: 0.025em;
+  transition: all 0.3s ease;
+  border: none;
+  cursor: pointer;
+  background: linear-gradient(135deg, #06b6d4 0%, #0891b2 100%);
+  color: white;
+  box-shadow:
+    0 4px 10px -2px rgba(6, 182, 212, 0.3),
+    0 2px 4px -1px rgba(6, 182, 212, 0.1);
+}
+
+.test-btn:hover:not(:disabled) {
+  transform: translateY(-1px);
+  box-shadow:
+    0 8px 15px -3px rgba(6, 182, 212, 0.4),
+    0 4px 6px -2px rgba(6, 182, 212, 0.15);
+}
+
+.test-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  transform: none;
 }
 
 /* Tab 胶囊按钮样式 */

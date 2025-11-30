@@ -75,6 +75,11 @@ class OpenAIResponsesAccountService {
       isActive: isActive.toString(),
       accountType,
       schedulable: schedulable.toString(),
+
+      // ✅ 新增：账户订阅到期时间（业务字段，手动管理）
+      // 注意：OpenAI-Responses 使用 API Key 认证，没有 OAuth token，因此没有 expiresAt
+      subscriptionExpiresAt: options.subscriptionExpiresAt || null,
+
       createdAt: new Date().toISOString(),
       lastUsedAt: '',
       status: 'active',
@@ -151,6 +156,12 @@ class OpenAIResponsesAccountService {
         : updates.baseApi
     }
 
+    // ✅ 直接保存 subscriptionExpiresAt（如果提供）
+    // OpenAI-Responses 使用 API Key，没有 token 刷新逻辑，不会覆盖此字段
+    if (updates.subscriptionExpiresAt !== undefined) {
+      // 直接保存，不做任何调整
+    }
+
     // 更新 Redis
     const client = redis.getClientSafe()
     const key = `${this.ACCOUNT_KEY_PREFIX}${accountId}`
@@ -212,6 +223,10 @@ class OpenAIResponsesAccountService {
           // 转换 isActive 字段为布尔值
           account.isActive = account.isActive === 'true'
 
+          // ✅ 前端显示订阅过期时间（业务字段）
+          account.expiresAt = account.subscriptionExpiresAt || null
+          account.platform = account.platform || 'openai-responses'
+
           accounts.push(account)
         }
       }
@@ -258,6 +273,10 @@ class OpenAIResponsesAccountService {
             // 转换 isActive 字段为布尔值
             accountData.isActive = accountData.isActive === 'true'
 
+            // ✅ 前端显示订阅过期时间（业务字段）
+            accountData.expiresAt = accountData.subscriptionExpiresAt || null
+            accountData.platform = accountData.platform || 'openai-responses'
+
             accounts.push(accountData)
           }
         }
@@ -291,6 +310,48 @@ class OpenAIResponsesAccountService {
     logger.warn(
       `⏳ Account ${account.name} marked as rate limited for ${rateLimitDuration} minutes (until ${resetAt.toISOString()})`
     )
+  }
+
+  // 🚫 标记账户为未授权状态（401错误）
+  async markAccountUnauthorized(accountId, reason = 'OpenAI Responses账号认证失败（401错误）') {
+    const account = await this.getAccount(accountId)
+    if (!account) {
+      return
+    }
+
+    const now = new Date().toISOString()
+    const currentCount = parseInt(account.unauthorizedCount || '0', 10)
+    const unauthorizedCount = Number.isFinite(currentCount) ? currentCount + 1 : 1
+
+    await this.updateAccount(accountId, {
+      status: 'unauthorized',
+      schedulable: 'false',
+      errorMessage: reason,
+      unauthorizedAt: now,
+      unauthorizedCount: unauthorizedCount.toString()
+    })
+
+    logger.warn(
+      `🚫 OpenAI-Responses account ${account.name || accountId} marked as unauthorized due to 401 error`
+    )
+
+    try {
+      const webhookNotifier = require('../utils/webhookNotifier')
+      await webhookNotifier.sendAccountAnomalyNotification({
+        accountId,
+        accountName: account.name || accountId,
+        platform: 'openai',
+        status: 'unauthorized',
+        errorCode: 'OPENAI_UNAUTHORIZED',
+        reason,
+        timestamp: now
+      })
+      logger.info(
+        `📢 Webhook notification sent for OpenAI-Responses account ${account.name || accountId} unauthorized state`
+      )
+    } catch (webhookError) {
+      logger.error('Failed to send unauthorized webhook notification:', webhookError)
+    }
   }
 
   // 检查并清除过期的限流状态
@@ -460,6 +521,25 @@ class OpenAIResponsesAccountService {
     }
 
     return { success: true, message: 'Account status reset successfully' }
+  }
+
+  // ⏰ 检查账户订阅是否已过期
+  isSubscriptionExpired(account) {
+    if (!account.subscriptionExpiresAt) {
+      return false // 未设置过期时间，视为永不过期
+    }
+
+    const expiryDate = new Date(account.subscriptionExpiresAt)
+    const now = new Date()
+
+    if (expiryDate <= now) {
+      logger.debug(
+        `⏰ OpenAI-Responses Account ${account.name} (${account.id}) subscription expired at ${account.subscriptionExpiresAt}`
+      )
+      return true
+    }
+
+    return false
   }
 
   // 获取限流信息

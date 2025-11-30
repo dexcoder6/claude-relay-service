@@ -5,8 +5,6 @@
 
 const express = require('express')
 const router = express.Router()
-const fs = require('fs')
-const path = require('path')
 const logger = require('../utils/logger')
 const { authenticateApiKey } = require('../middleware/auth')
 const claudeRelayService = require('../services/claudeRelayService')
@@ -15,22 +13,34 @@ const apiKeyService = require('../services/apiKeyService')
 const unifiedClaudeScheduler = require('../services/unifiedClaudeScheduler')
 const claudeCodeHeadersService = require('../services/claudeCodeHeadersService')
 const sessionHelper = require('../utils/sessionHelper')
-
-// 加载模型定价数据
-let modelPricingData = {}
-try {
-  const pricingPath = path.join(__dirname, '../../data/model_pricing.json')
-  const pricingContent = fs.readFileSync(pricingPath, 'utf8')
-  modelPricingData = JSON.parse(pricingContent)
-  logger.info('✅ Model pricing data loaded successfully')
-} catch (error) {
-  logger.error('❌ Failed to load model pricing data:', error)
-}
+const { updateRateLimitCounters } = require('../utils/rateLimitHelper')
+const pricingService = require('../services/pricingService')
 
 // 🔧 辅助函数：检查 API Key 权限
 function checkPermissions(apiKeyData, requiredPermission = 'claude') {
   const permissions = apiKeyData.permissions || 'all'
   return permissions === 'all' || permissions === requiredPermission
+}
+
+function queueRateLimitUpdate(rateLimitInfo, usageSummary, model, context = '') {
+  if (!rateLimitInfo) {
+    return
+  }
+
+  const label = context ? ` (${context})` : ''
+
+  updateRateLimitCounters(rateLimitInfo, usageSummary, model)
+    .then(({ totalTokens, totalCost }) => {
+      if (totalTokens > 0) {
+        logger.api(`📊 Updated rate limit token count${label}: +${totalTokens} tokens`)
+      }
+      if (typeof totalCost === 'number' && totalCost > 0) {
+        logger.api(`💰 Updated rate limit cost count${label}: +$${totalCost.toFixed(6)}`)
+      }
+    })
+    .catch((error) => {
+      logger.error(`❌ Failed to update rate limit counters${label}:`, error)
+    })
 }
 
 // 📋 OpenAI 兼容的模型列表端点
@@ -118,7 +128,7 @@ router.get('/v1/models/:model', authenticateApiKey, async (req, res) => {
     }
 
     // 从 model_pricing.json 获取模型信息
-    const modelData = modelPricingData[modelId]
+    const modelData = pricingService.getModelPricing(modelId)
 
     // 构建标准 OpenAI 格式的模型响应
     let modelInfo
@@ -206,11 +216,23 @@ async function handleChatCompletion(req, res, apiKeyData) {
     const sessionHash = sessionHelper.generateSessionHash(claudeRequest)
 
     // 选择可用的Claude账户
-    const accountSelection = await unifiedClaudeScheduler.selectAccountForApiKey(
-      apiKeyData,
-      sessionHash,
-      claudeRequest.model
-    )
+    let accountSelection
+    try {
+      accountSelection = await unifiedClaudeScheduler.selectAccountForApiKey(
+        apiKeyData,
+        sessionHash,
+        claudeRequest.model
+      )
+    } catch (error) {
+      if (error.code === 'CLAUDE_DEDICATED_RATE_LIMITED') {
+        const limitMessage = claudeRelayService._buildStandardRateLimitMessage(error.rateLimitEndAt)
+        return res.status(403).json({
+          error: 'upstream_rate_limited',
+          message: limitMessage
+        })
+      }
+      throw error
+    }
     const { accountId } = accountSelection
 
     // 获取该账号存储的 Claude Code headers
@@ -251,6 +273,12 @@ async function handleChatCompletion(req, res, apiKeyData) {
           // 记录使用统计
           if (usage && usage.input_tokens !== undefined && usage.output_tokens !== undefined) {
             const model = usage.model || claudeRequest.model
+            const cacheCreateTokens =
+              (usage.cache_creation && typeof usage.cache_creation === 'object'
+                ? (usage.cache_creation.ephemeral_5m_input_tokens || 0) +
+                  (usage.cache_creation.ephemeral_1h_input_tokens || 0)
+                : usage.cache_creation_input_tokens || 0) || 0
+            const cacheReadTokens = usage.cache_read_input_tokens || 0
 
             // 使用新的 recordUsageWithDetails 方法来支持详细的缓存数据
             apiKeyService
@@ -263,6 +291,18 @@ async function handleChatCompletion(req, res, apiKeyData) {
               .catch((error) => {
                 logger.error('❌ Failed to record usage:', error)
               })
+
+            queueRateLimitUpdate(
+              req.rateLimitInfo,
+              {
+                inputTokens: usage.input_tokens || 0,
+                outputTokens: usage.output_tokens || 0,
+                cacheCreateTokens,
+                cacheReadTokens
+              },
+              model,
+              'openai-claude-stream'
+            )
           }
         },
         // 流转换器
@@ -322,6 +362,12 @@ async function handleChatCompletion(req, res, apiKeyData) {
       // 记录使用统计
       if (claudeData.usage) {
         const { usage } = claudeData
+        const cacheCreateTokens =
+          (usage.cache_creation && typeof usage.cache_creation === 'object'
+            ? (usage.cache_creation.ephemeral_5m_input_tokens || 0) +
+              (usage.cache_creation.ephemeral_1h_input_tokens || 0)
+            : usage.cache_creation_input_tokens || 0) || 0
+        const cacheReadTokens = usage.cache_read_input_tokens || 0
         // 使用新的 recordUsageWithDetails 方法来支持详细的缓存数据
         apiKeyService
           .recordUsageWithDetails(
@@ -333,6 +379,18 @@ async function handleChatCompletion(req, res, apiKeyData) {
           .catch((error) => {
             logger.error('❌ Failed to record usage:', error)
           })
+
+        queueRateLimitUpdate(
+          req.rateLimitInfo,
+          {
+            inputTokens: usage.input_tokens || 0,
+            outputTokens: usage.output_tokens || 0,
+            cacheCreateTokens,
+            cacheReadTokens
+          },
+          claudeRequest.model,
+          'openai-claude-non-stream'
+        )
       }
 
       // 返回 OpenAI 格式响应
@@ -420,3 +478,4 @@ router.post('/v1/completions', authenticateApiKey, async (req, res) => {
 })
 
 module.exports = router
+module.exports.handleChatCompletion = handleChatCompletion
